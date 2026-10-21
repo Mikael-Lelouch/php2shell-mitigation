@@ -4,44 +4,64 @@
 #   CVE-2026-109619 (GHSA-6wmf-4rv5-p3rp) RCE via stale global state
 # Official notice: https://www.php.net/archive/2026.php#2026-10-21-1
 #
-# Inspects every PHP CLI, PHP-FPM and Apache mod_php (Debian layout) runtime it
-# can find and reports its version plus the effective values of the official
-# interim settings:
+# Inspects every PHP CLI, PHP-FPM, php-cgi, Apache mod_php (Debian layout),
+# LiteSpeed (lsphp) and FrankenPHP runtime it can find and reports its version
+# plus the effective values of the official interim settings:
 #   session.upload_progress.enabled   want 0            (CVE-2026-109619)
 #   memory_limit                      want -1           (CVE-2026-109618)
 #   fatal_error_backtraces            want 0, PHP 8.5   (CVE-2026-109619)
 #   post_max_size                     8M, max 32M       (reported, warning only)
 #   upload_max_filesize               < post_max_size   (reported, warning only)
 #   session.use_strict_mode           informational only (not in the advisory)
-# including per-pool php_admin_value/flag and php_value/flag overrides in
-# PHP-FPM pool files, and RLIMIT_AS / RLIMIT_DATA on running FPM processes.
+# including per-pool php_admin_value/flag and php_value/flag overrides of every
+# PHP-FPM pool (read from `php-fpm -tt`, i.e. what FPM itself will apply), and
+# RLIMIT_AS / RLIMIT_DATA on running web SAPI processes.
 #
-# It changes nothing on the host. Run as root for complete FPM results
-# (php-fpm -tt, pool files and /proc/<pid>/limits are often root-only).
+# A runtime counts as PATCHED when its version is a fixed upstream release OR
+# when the package that owns it (dpkg / rpm) lists both CVE ids in its
+# changelog: Debian, Ubuntu and RHEL backport the fix without changing the
+# upstream version number.
+#
+# It also warns about running processes whose binary (or mod_php library) was
+# replaced on disk after they started: a package update without a restart
+# leaves the vulnerable code in memory.
+#
+# It changes nothing on the host. Run as root for complete results (php-fpm
+# -tt, pool files, /proc/<pid>/maps and /proc/<pid>/limits are often root-only).
 #
 # Exit codes (worst result wins):
-#   0  PATCHED     every runtime found runs a fixed PHP version
+#   0  PATCHED     every runtime found runs a fixed PHP version / vendor backport
 #   1  MITIGATED   not (all) patched, but every unpatched runtime has the
 #                  official interim settings. STILL UNSAFE: update PHP.
-#   2  EXPOSED     at least one runtime is unpatched and not mitigated
-#   3  UNKNOWN     no PHP runtime found, or an end-of-life runtime (7.4/8.0/8.1
-#                  or older) that is not mitigated and whose backport status
-#                  cannot be determined from its version ("EOL-VERIFY")
+#   2  EXPOSED     at least one runtime is unpatched and not mitigated, or a
+#                  process still runs a binary that was replaced on disk
+#   3  UNKNOWN     no PHP runtime found, or a runtime that cannot be classified
+#                  (end-of-life 7.4/8.0/8.1 or older without a known backport:
+#                  "EOL-VERIFY"; a branch newer than this script knows:
+#                  "UNKNOWN-BRANCH"; or bash older than 4)
+#   64 usage error (unknown option)
 #
-# Usage: ./check-php2shell.sh [-q]      (-q: only print the final verdict)
+# Usage: ./check-php2shell.sh [-q] [-h] [-V]
+#   -q, --quiet     only print the final verdict
+#   -h, --help      show this help
+#   -V, --version   show the script version
 #
 # Environment:
 #   FIXED_8_2 ... FIXED_8_5    override the fixed version of a branch
+#                              (FIXED_8_6 etc. can be set to classify newer branches)
 #   PHP2SHELL_EOL_BACKPORTED=1 count end-of-life runtimes as patched (only if
 #                              you installed the official 7.4/8.0/8.1 source
 #                              backport or a vendor backport)
 #   PHP2SHELL_BIN_DIRS / PHP2SHELL_SBIN_DIRS
 #                              colon-separated dirs that REPLACE the default
 #                              search dirs for php / php-fpm binaries
+#   PHP2SHELL_ETC, PHP2SHELL_DOC_DIR, PHP2SHELL_PROC
+#                              /etc, /usr/share/doc and /proc locations (test hooks)
 #
 # This script cannot see: PHP_VALUE / PHP_ADMIN_VALUE sent by nginx or Apache
 # to FPM, .htaccess files, application ini_set() calls, frontend request
-# limits or cgroup memory limits. Review those by hand.
+# limits or cgroup memory limits. Review those by hand. lsphp and FrankenPHP
+# get a version check only (their settings are not evaluated).
 #
 # Docker: this script does not look inside containers. Run it in each one:
 #   docker exec -i <container> bash -s < check-php2shell.sh
@@ -50,9 +70,39 @@
 
 set -u
 
+SCRIPT_VERSION="1.1.0"
+
+# mapfile and the array handling below need bash 4+
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "check-php2shell.sh needs bash 4 or newer (found: ${BASH_VERSION:-unknown})" >&2
+    echo "VERDICT: UNKNOWN (bash too old)"
+    exit 3
+fi
+
+usage() { # static text: the script may be read from stdin (docker exec -i ... bash -s)
+    echo "Usage: check-php2shell.sh [-q] [-h] [-V]"
+    echo "  -q, --quiet     only print the final verdict"
+    echo "  -h, --help      show this help"
+    echo "  -V, --version   show the script version"
+    echo "Exit codes: 0 PATCHED, 1 MITIGATED, 2 EXPOSED, 3 UNKNOWN, 64 usage error"
+}
+
+QUIET=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -q|--quiet)   QUIET=1 ;;
+        -h|--help)    usage; exit 0 ;;
+        -V|--version) echo "check-php2shell.sh $SCRIPT_VERSION"; exit 0 ;;
+        *)            echo "check-php2shell.sh: unknown option: $1" >&2; usage >&2; exit 64 ;;
+    esac
+    shift
+done
+
 # --------------------------------------------------------------------------
 # Fixed versions per branch (php.net security releases of 21 Oct 2026).
 # Branches below 8.2 are end-of-life: only source/vendor backports exist.
+# Branches above 8.5 are not listed: they are reported as UNKNOWN-BRANCH
+# unless you set FIXED_<major>_<minor> yourself.
 # --------------------------------------------------------------------------
 FIXED_8_2="${FIXED_8_2:-8.2.35}"
 FIXED_8_3="${FIXED_8_3:-8.3.36}"
@@ -60,11 +110,13 @@ FIXED_8_4="${FIXED_8_4:-8.4.27}"
 FIXED_8_5="${FIXED_8_5:-8.5.12}"
 EOL_BACKPORTED="${PHP2SHELL_EOL_BACKPORTED:-0}"
 
-QUIET=0
-[ "${1:-}" = "-q" ] && QUIET=1
+ETC_DIR="${PHP2SHELL_ETC:-/etc}"
+DOC_DIR="${PHP2SHELL_DOC_DIR:-/usr/share/doc}"
+PROC_DIR="${PHP2SHELL_PROC:-/proc}"
 
-# severity rank: 0 patched, 1 mitigated, 2 eol-verify, 3 exposed
+# severity rank: 0 patched, 1 mitigated, 2 unclassified (eol-verify / unknown-branch), 3 exposed
 WORST=-1
+STALE=0
 
 say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
 
@@ -103,36 +155,101 @@ to_bytes() { # 8M -> 8388608 ; prints "" if not parseable
     esac
 }
 
-fixed_for() { # $1 = X.Y.Z -> prints fixed version for its branch, "EOL" or ""
-    local branch
-    branch=$(printf '%s' "$1" | cut -d. -f1,2)
-    case "$branch" in
-        8.2) echo "$FIXED_8_2" ;;
-        8.3) echo "$FIXED_8_3" ;;
-        8.4) echo "$FIXED_8_4" ;;
-        8.5) echo "$FIXED_8_5" ;;
-        8.[6-9]|9.*) echo "" ;;   # newer branches: check upstream yourself
-        *)   echo "EOL" ;;
-    esac
+fixed_for() { # $1 = X.Y.Z[suffix] -> fixed version of its branch, "EOL", or "" (branch unknown)
+    local major minor var
+    [[ $1 =~ ^([0-9]+)\.([0-9]+) ]] || { echo ""; return; }
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    if [ "$major" -lt 8 ] || { [ "$major" -eq 8 ] && [ "$minor" -le 1 ]; }; then
+        echo "EOL"
+        return
+    fi
+    var="FIXED_${major}_${minor}"
+    echo "${!var:-}"
 }
 
-version_ge() { # $1 >= $2 ?
-    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+# Pure bash on purpose (no sort | head pipe): a pipeline whose reader exits early
+# prints "write error: Broken pipe" on stderr when SIGPIPE is ignored, which is how
+# some CI runners and supervisors start their children.
+version_ge() { # $1 >= $2 ? dotted numeric versions
+    local -a a b
+    local i x y
+    IFS=. read -r -a a <<<"$1"
+    IFS=. read -r -a b <<<"$2"
+    for i in 0 1 2 3; do
+        x=${a[i]:-0}; y=${b[i]:-0}
+        [[ $x =~ ^[0-9]+$ ]] || x=0
+        [[ $y =~ ^[0-9]+$ ]] || y=0
+        if ((10#$x > 10#$y)); then return 0; fi
+        if ((10#$x < 10#$y)); then return 1; fi
+    done
+    return 0
+}
+
+# 8.5.12RC1, 8.3.36-dev ... : a pre-release of a version number is not the release
+is_prerelease() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+-?(alpha|beta|RC|rc|dev) ]]; }
+
+is_fixed() { # $1 = version as reported by PHP, $2 = fixed version of its branch
+    local num=${1%%[!0-9.]*}      # 8.3.36-1+deb12u1 -> 8.3.36, 8.5.12RC1 -> 8.5.12
+    version_ge "$num" "$2" || return 1
+    ! { is_prerelease "$1" && [ "$num" = "$2" ]; }
+}
+
+# ---------------------------------------------------------------- vendor backports
+VENDOR_PKG=""
+
+changelog_text() { # $1 = dpkg package name -> installed changelog(s)
+    local f
+    for f in "$DOC_DIR/$1"/changelog*; do
+        [ -f "$f" ] || continue
+        case "$f" in
+            *.gz) gzip -dc "$f" 2>/dev/null ;;
+            *)    cat "$f" 2>/dev/null ;;
+        esac
+    done
+}
+
+# vendor_patched <file>: succeeds when the dpkg/rpm package owning <file> lists
+# BOTH CVE ids in its changelog (sets VENDOR_PKG). Both ids must appear: a
+# changelog may name the patch file CVE-2026-109618_109619.patch.
+vendor_patched() {
+    local path=$1 real pkg="" text=""
+    VENDOR_PKG=""
+    [ -n "$path" ] && [ -e "$path" ] || return 1
+    real=$(readlink -f "$path" 2>/dev/null) || real=$path
+    if command -v dpkg >/dev/null 2>&1; then
+        pkg=$(dpkg -S "$real" 2>/dev/null | head -n1 | sed -E 's/: .*$//; s/,.*$//; s/:[^:]*$//')
+        [ -n "$pkg" ] && text=$(changelog_text "$pkg")
+    fi
+    if [ -z "$text" ] && command -v rpm >/dev/null 2>&1; then
+        if pkg=$(rpm -qf "$real" 2>/dev/null | head -n1) && [ -n "$pkg" ]; then
+            text=$(rpm -q --changelog "$pkg" 2>/dev/null)
+        fi
+    fi
+    # pattern match, not `printf | grep -q`: see version_ge about early-exit pipes
+    # (a Debian changelog is larger than the 64 KiB pipe buffer)
+    [[ $text == *CVE-2026-109618* && $text == *CVE-2026-109619* ]] || return 1
+    VENDOR_PKG=$pkg
+    return 0
 }
 
 # evaluate <label> <version> <upload_progress> <memory_limit> <fatal_bt>
-#          <post_max_size> <upload_max_filesize> <use_strict_mode> [notes]
+#          <post_max_size> <upload_max_filesize> <use_strict_mode> [notes] [vendor file]
+# A setting of "?" means "not evaluated" (version-only checks).
 evaluate() {
-    local label=$1 ver=$2 up=$3 mem=$4 feb=$5 post=$6 upl=$7 strict=$8 extra=${9:-}
-    local fixed branch status rank mitigated=0 note="" pb ub
+    local label=$1 ver=$2 up=$3 mem=$4 feb=$5 post=$6 upl=$7 strict=$8 extra=${9:-} vfile=${10:-}
+    local fixed status rank mitigated=0 note="" pb ub
     fixed=$(fixed_for "$ver")
-    branch=$(printf '%s' "$ver" | cut -d. -f1,2)
 
-    if [ "$up" = "0" ] && [ "$mem" = "-1" ]; then
-        if [ "$branch" != "8.5" ] || [ "$feb" = "0" ]; then mitigated=1; fi
+    if { [ "$up" = "0" ] || [ "$up" = "n/a" ]; } && [ "$mem" = "-1" ] \
+        && { [ "$feb" = "0" ] || [ "$feb" = "n/a" ]; }; then
+        mitigated=1
     fi
 
-    if [ "$fixed" = "EOL" ]; then
+    if [ -n "$vfile" ] && vendor_patched "$vfile"; then
+        status=PATCHED; rank=0
+        note=" (vendor backport: the changelog of $VENDOR_PKG lists CVE-2026-109618 and CVE-2026-109619)"
+    elif [ "$fixed" = "EOL" ]; then
         if [ "$EOL_BACKPORTED" = "1" ]; then
             status=PATCHED; rank=0; note=" (end-of-life: backport declared via PHP2SHELL_EOL_BACKPORTED=1)"
         elif [ "$mitigated" -eq 1 ]; then
@@ -140,13 +257,16 @@ evaluate() {
         else
             status=EOL-VERIFY; rank=2; note=" (end-of-life: EXPOSED unless it carries the official/vendor backport; verify, see PATCHING.md)"
         fi
-    elif [ -n "$fixed" ] && version_ge "$ver" "$fixed"; then
+    elif [ -n "$fixed" ] && is_fixed "$ver" "$fixed"; then
         status=PATCHED; rank=0
     elif [ "$mitigated" -eq 1 ]; then
         status=MITIGATED; rank=1
+    elif [ -z "$fixed" ]; then
+        status=UNKNOWN-BRANCH; rank=2
+        note=" (branch newer than this script knows: confirm upstream that this build has the fix, or set FIXED_<major>_<minor>)"
     else
         status=EXPOSED; rank=3
-        [ -z "$fixed" ] && note=" (unknown branch: check upstream)"
+        is_prerelease "$ver" && note=" (pre-release build: not a fixed release even if the number matches)"
     fi
     bump "$rank"
 
@@ -155,9 +275,9 @@ evaluate() {
 
     [ "$status" = PATCHED ] && [ -z "$extra" ] && return 0
     if [ "$status" != PATCHED ]; then
-        [ "$up" != "0" ] && say "      - set session.upload_progress.enabled=0 (CVE-2026-109619)"
-        [ "$mem" != "-1" ] && say "      - set memory_limit=-1 administratively (CVE-2026-109618)"
-        [ "$branch" = "8.5" ] && [ "$feb" != "0" ] && say "      - PHP 8.5: set fatal_error_backtraces=0 (CVE-2026-109619)"
+        [ "$up" = "1" ] && say "      - set session.upload_progress.enabled=0 (CVE-2026-109619)"
+        [ "$mem" != "-1" ] && [ "$mem" != "?" ] && say "      - set memory_limit=-1 administratively (CVE-2026-109618)"
+        [ "$feb" = "1" ] && say "      - set fatal_error_backtraces=0 (PHP 8.5, CVE-2026-109619)"
     fi
     pb=$(to_bytes "$post"); ub=$(to_bytes "$upl")
     if [ -n "$pb" ]; then
@@ -181,10 +301,10 @@ list_bins() { # $1 = regex for basename, rest = dirs
     for d in "$@"; do
         [ -d "$d" ] || continue
         for f in "$d"/*; do
-            if [ ! -f "$f" ] || [ ! -x "$f" ]; then continue; fi
-            if printf '%s' "${f##*/}" | grep -Eq "$re"; then
-                readlink -f "$f"
-            fi
+            # in-process name match first: /usr/bin holds thousands of files and
+            # this runs once per SAPI, so no fork per file
+            [[ ${f##*/} =~ $re ]] || continue
+            if [ -f "$f" ] && [ -x "$f" ]; then readlink -f "$f"; fi
         done
     done | sort -u
 }
@@ -193,7 +313,8 @@ if [ -n "${PHP2SHELL_BIN_DIRS:-}" ]; then
     IFS=: read -r -a BIN_DIRS <<<"$PHP2SHELL_BIN_DIRS"
 else
     BIN_DIRS=(/usr/bin /usr/local/bin /bin)
-    for d in /opt/remi/php*/root/usr/bin /opt/cpanel/ea-php*/root/usr/bin /opt/plesk/php/*/bin /opt/alt/php*/usr/bin; do
+    for d in /opt/remi/php*/root/usr/bin /opt/cpanel/ea-php*/root/usr/bin /opt/plesk/php/*/bin \
+             /opt/alt/php*/usr/bin /usr/local/lsws/lsphp*/bin; do
         [ -d "$d" ] && BIN_DIRS+=("$d")
     done
 fi
@@ -207,6 +328,9 @@ else
 fi
 
 mapfile -t CLI_BINS < <(list_bins '^php([0-9]+(\.[0-9]+)?)?$' "${BIN_DIRS[@]}")
+mapfile -t CGI_BINS < <(list_bins '^php-cgi([0-9]+(\.[0-9]+)?)?$' "${BIN_DIRS[@]}")
+mapfile -t LSAPI_BINS < <(list_bins '^lsphp([0-9]+(\.[0-9]+)?)?$' "${BIN_DIRS[@]}")
+mapfile -t FRANKEN_BINS < <(list_bins '^frankenphp$' "${BIN_DIRS[@]}")
 mapfile -t FPM_BINS < <(list_bins '^php-fpm([0-9]+(\.[0-9]+)?)?$' "${SBIN_DIRS[@]}")
 
 # Prints: version|upload_progress|memory_limit|fatal_error_backtraces|post_max_size|upload_max_filesize|use_strict_mode
@@ -223,33 +347,75 @@ parse_snippet() {
     V_MEM=$(norm_val "$V_MEM"); V_POST=$(norm_val "$V_POST"); V_UPL=$(norm_val "$V_UPL")
 }
 
+valid_snippet_output() { # 7 pipe-separated fields
+    case "$1" in *"|"*"|"*"|"*"|"*"|"*"|"*) return 0 ;; *) return 1 ;; esac
+}
+
+version_from_v() { # reads `<bin> -v` / `frankenphp version` output, prints PHP's version string
+    local text re='PHP ([0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._+~-]*)'
+    text=$(cat)
+    if [[ $text =~ $re ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; fi
+}
+
 # ---------------------------------------------------------------- CLI
 say "== PHP CLI (version check; CLI does not serve web requests)"
 seen_cli=""
-for bin in "${CLI_BINS[@]}"; do
+for bin in ${CLI_BINS[@]+"${CLI_BINS[@]}"}; do
     out=$("$bin" -r "$INI_SNIPPET" 2>/dev/null) || continue
-    case "$out" in *"|"*"|"*"|"*"|"*"|"*"|"*) ;; *) continue ;; esac
+    valid_snippet_output "$out" || continue
     case " $seen_cli " in *" $bin "*) continue ;; esac
     seen_cli="$seen_cli $bin"
     parse_snippet "$out"
-    evaluate "cli:$bin" "$V_VER" "$V_UP" "$V_MEM" "$V_FEB" "$V_POST" "$V_UPL" "$V_ST"
+    evaluate "cli:$bin" "$V_VER" "$V_UP" "$V_MEM" "$V_FEB" "$V_POST" "$V_UPL" "$V_ST" "" "$bin"
 done
 [ -z "$seen_cli" ] && say "  (none found)"
 
+# ---------------------------------------------------------------- php-cgi
+if [ "${#CGI_BINS[@]}" -gt 0 ]; then
+    say "== php-cgi"
+    for bin in "${CGI_BINS[@]}"; do
+        out=$(printf '<?php %s' "$INI_SNIPPET" | "$bin" -q 2>/dev/null) || continue
+        valid_snippet_output "$out" || continue
+        parse_snippet "$out"
+        evaluate "cgi:$bin" "$V_VER" "$V_UP" "$V_MEM" "$V_FEB" "$V_POST" "$V_UPL" "$V_ST" "" "$bin"
+    done
+fi
+
+# ---------------------------------------------------------------- LiteSpeed / FrankenPHP (version only)
+version_only() { # $1 = label, $2 = binary, $3 = version argument
+    local ver
+    ver=$("$2" "$3" 2>/dev/null | version_from_v)
+    [ -n "$ver" ] || return 0
+    evaluate "$1:$2" "$ver" "?" "?" "?" "?" "?" "?" "version check only: settings are not evaluated for this SAPI, review them by hand" "$2"
+}
+if [ "${#LSAPI_BINS[@]}" -gt 0 ]; then
+    say "== LiteSpeed lsphp (version only)"
+    for bin in "${LSAPI_BINS[@]}"; do version_only lsapi "$bin" -v; done
+fi
+if [ "${#FRANKEN_BINS[@]}" -gt 0 ]; then
+    say "== FrankenPHP (version only)"
+    for bin in "${FRANKEN_BINS[@]}"; do version_only frankenphp "$bin" version; done
+fi
+
 # ---------------------------------------------------------------- Apache mod_php (Debian/Ubuntu layout)
-for ini in /etc/php/*/apache2/php.ini; do
+for ini in "$ETC_DIR"/php/*/apache2/php.ini; do
     [ -f "$ini" ] || continue
-    xy=$(printf '%s' "$ini" | cut -d/ -f4)
+    xy=${ini#"$ETC_DIR"/php/}; xy=${xy%%/*}
     bin=$(command -v "php$xy" 2>/dev/null) || continue
+    vlib="/usr/lib/apache2/modules/libphp$xy.so"
+    [ -f "$vlib" ] || vlib=$bin
     say "== Apache mod_php $xy (approximation via php$xy CLI with apache2 ini; highest-risk SAPI)"
-    out=$(PHP_INI_SCAN_DIR="/etc/php/$xy/apache2/conf.d" "$bin" -c "$ini" -r "$INI_SNIPPET" 2>/dev/null) || continue
+    out=$(PHP_INI_SCAN_DIR="$ETC_DIR/php/$xy/apache2/conf.d" "$bin" -c "$ini" -r "$INI_SNIPPET" 2>/dev/null) || continue
+    valid_snippet_output "$out" || continue
     parse_snippet "$out"
-    evaluate "apache2:$ini" "$V_VER" "$V_UP" "$V_MEM" "$V_FEB" "$V_POST" "$V_UPL" "$V_ST"
+    evaluate "apache2:$ini" "$V_VER" "$V_UP" "$V_MEM" "$V_FEB" "$V_POST" "$V_UPL" "$V_ST" "" "$vlib"
 done
 apache_dirs=()
-for d in /etc/apache2 /etc/httpd; do [ -d "$d" ] && apache_dirs+=("$d"); done
+for d in "$ETC_DIR/apache2" "$ETC_DIR/httpd"; do [ -d "$d" ] && apache_dirs+=("$d"); done
 if [ "${#apache_dirs[@]}" -gt 0 ]; then
-    hits=$(grep -rEn '^[[:space:]]*php_(admin_)?(value|flag)[[:space:]]' "${apache_dirs[@]}" 2>/dev/null)
+    # `php_admin_flag engine` is the stock "no PHP in user dirs" line, unrelated to this advisory
+    hits=$(grep -rEn '^[[:space:]]*php_(admin_)?(value|flag)[[:space:]]' "${apache_dirs[@]}" 2>/dev/null \
+        | grep -Ev ':[0-9]+:[[:space:]]*php_admin_flag[[:space:]]+engine[[:space:]]')
     if [ -n "$hits" ]; then
         say "== Apache php_value / php_flag directives (applied per request before startup: check they"
         say "   are valid and do not put back a finite memory_limit or enable upload progress)"
@@ -258,32 +424,50 @@ if [ "${#apache_dirs[@]}" -gt 0 ]; then
 fi
 
 # ---------------------------------------------------------------- PHP-FPM
+# Effective configuration of every pool, as FPM itself parses it (it resolves
+# include= relative to its prefix, which differs between distributions and the
+# Docker image). Printed in pool-file syntax; fails when FPM cannot parse it.
+fpm_effective_conf() { # $1 = fpm binary
+    local out
+    out=$("$1" -tt 2>&1) || return 1
+    case "$out" in *"ERROR:"*) return 1 ;; *"[global]"*) ;; *) return 1 ;; esac
+    printf '%s\n' "$out" | sed -E 's/^\[[^]]*\] [A-Z]+: ?//'
+}
+
+# Fallback when `php-fpm -tt` fails: locate and read the pool files ourselves.
 fpm_main_conf() { # $1 = fpm binary, $2 = X.Y
     local bin=$1 xy=$2 nodot c
     nodot=${xy/./}
-    c=$("$bin" -tt 2>&1 | grep -Eo 'configuration file [^ ]+' | head -n1 | awk '{print $3}')
-    if [ -n "$c" ] && [ -f "$c" ]; then echo "$c"; return; fi
-    for c in "/etc/php/$xy/fpm/php-fpm.conf" "/etc/php$nodot/php-fpm.conf" \
-             "/etc/opt/remi/php$nodot/php-fpm.conf" "/usr/local/etc/php-fpm.conf" \
-             "/etc/php-fpm.conf"; do
+    c=$("$bin" -tt 2>&1)
+    if [[ $c =~ configuration\ file\ \'?([^\ \']+) ]]; then
+        c=${BASH_REMATCH[1]}
+        if [ -f "$c" ]; then echo "$c"; return; fi
+    fi
+    for c in "$ETC_DIR/php/$xy/fpm/php-fpm.conf" "$ETC_DIR/php$nodot/php-fpm.conf" \
+             "$ETC_DIR/opt/remi/php$nodot/php-fpm.conf" "/usr/local/etc/php-fpm.conf" \
+             "$ETC_DIR/php-fpm.conf"; do
         [ -f "$c" ] && { echo "$c"; return; }
     done
 }
 
-conf_files() { # main conf + its include= globs
-    local main=$1 dir inc pattern f
+conf_files() { # main conf + its include= globs (relative globs: tried against the conf dir and common prefixes)
+    local main=$1 dir inc pattern f base
     echo "$main"
     dir=$(dirname "$main")
     while IFS= read -r inc; do
         pattern=$(printf '%s' "$inc" | sed -E 's/^[[:space:]]*include[[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"//; s/"$//')
         pattern=${pattern//\$\{prefix\}/\/usr}
-        case "$pattern" in /*) ;; *) pattern="$dir/$pattern" ;; esac
-        for f in $pattern; do [ -f "$f" ] && echo "$f"; done
+        case "$pattern" in
+            /*) for f in $pattern; do [ -f "$f" ] && echo "$f"; done ;;
+            *)  for base in "$dir" /usr/local /usr; do
+                    for f in "$base"/$pattern; do [ -f "$f" ] && echo "$f"; done
+                done ;;
+        esac
     done < <(grep -E '^[[:space:]]*include[[:space:]]*=' "$main" 2>/dev/null)
 }
 
-# prints "pool|kind|directive|value" (kind = admin or user) for overrides of
-# the relevant directives, plus "pool|-|-|-" for every pool
+# stdin: pool-file syntax. Prints "pool|kind|directive|value" (kind = admin or
+# user) for overrides of the relevant directives, plus "pool|-|-|-" for every pool
 pool_overrides() {
     awk '
         /^[[:space:]]*[;#]/ { next }
@@ -303,7 +487,7 @@ pool_overrides() {
             v=$0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*([;#].*)?$/, "", v)
             if (pool != "" && pool != "global") print pool "|pm|pm.max_requests|" v
         }
-    ' "$@" 2>/dev/null
+    ' 2>/dev/null
 }
 
 info_val() { # $1 = php -i output, $2 = directive -> local value or n/a
@@ -312,25 +496,10 @@ info_val() { # $1 = php -i output, $2 = directive -> local value or n/a
     if [ "$v" = $'\001' ]; then echo "n/a"; else echo "$v"; fi
 }
 
-# RLIMIT_AS / RLIMIT_DATA on running php-fpm processes (must stay unlimited)
-check_rlimits() {
-    local pid lim bad=0
-    for pid in $(pgrep -f 'php-fpm' 2>/dev/null); do
-        [ -r "/proc/$pid/limits" ] || continue
-        lim=$(awk '/^Max (address space|data size)/ { if ($4 != "unlimited") print $1" "$2" "$3" = "$4 }' "/proc/$pid/limits")
-        if [ -n "$lim" ]; then
-            say "  ! pid $pid ($(tr '\0' ' ' < "/proc/$pid/cmdline" | cut -c1-60)): $lim"
-            bad=1
-        fi
-    done
-    [ "$bad" -eq 1 ] && say "    RLIMIT_AS / RLIMIT_DATA must not be used (they trigger CVE-2026-109618); use a cgroup limit instead."
-    return 0
-}
-
 say "== PHP-FPM"
 [ "${#FPM_BINS[@]}" -eq 0 ] && say "  (none found)"
-for fpm in "${FPM_BINS[@]}"; do
-    ver=$("$fpm" -v 2>/dev/null | head -n1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+for fpm in ${FPM_BINS[@]+"${FPM_BINS[@]}"}; do
+    ver=$("$fpm" -v 2>/dev/null | version_from_v)
     [ -n "$ver" ] || continue
     xy=$(printf '%s' "$ver" | cut -d. -f1,2)
     info=$("$fpm" -i 2>/dev/null)
@@ -345,18 +514,24 @@ for fpm in "${FPM_BINS[@]}"; do
         b_up="?"; b_st="?"; b_feb="?"; b_mem="?"; b_post="?"; b_upl="?"
     fi
     say "  $fpm (PHP $ver) php.ini: upload_progress.enabled=$b_up memory_limit=$b_mem fatal_error_backtraces=$b_feb post_max_size=$b_post"
-    main=$(fpm_main_conf "$fpm" "$xy")
-    if [ -z "$main" ]; then
-        say "  ! php-fpm.conf not found/readable (run as root?) - evaluating php.ini values only"
-        evaluate "fpm:$fpm" "$ver" "$b_up" "$b_mem" "$b_feb" "$b_post" "$b_upl" "$b_st"
-        continue
+
+    if dump=$(fpm_effective_conf "$fpm"); then
+        mapfile -t ovr < <(pool_overrides <<<"$dump")
+    else
+        main=$(fpm_main_conf "$fpm" "$xy")
+        if [ -z "$main" ]; then
+            say "  ! php-fpm -tt failed and php-fpm.conf was not found/readable (run as root?) - evaluating php.ini values only"
+            evaluate "fpm:$fpm" "$ver" "$b_up" "$b_mem" "$b_feb" "$b_post" "$b_upl" "$b_st" "" "$fpm"
+            continue
+        fi
+        say "  ! php-fpm -tt failed: reading pool files from $main instead"
+        mapfile -t files < <(conf_files "$main")
+        mapfile -t ovr < <(cat "${files[@]}" 2>/dev/null | pool_overrides)
     fi
-    mapfile -t files < <(conf_files "$main")
-    mapfile -t ovr < <(pool_overrides "${files[@]}")
-    pools=$(printf '%s\n' "${ovr[@]}" | cut -d'|' -f1 | grep -v '^$' | awk '!seen[$0]++')
+    pools=$(printf '%s\n' ${ovr[@]+"${ovr[@]}"} | cut -d'|' -f1 | grep -v '^$' | awk '!seen[$0]++')
     if [ -z "$pools" ]; then
-        say "  ! no pool found in $main includes - evaluating php.ini values only"
-        evaluate "fpm:$fpm" "$ver" "$b_up" "$b_mem" "$b_feb" "$b_post" "$b_upl" "$b_st"
+        say "  ! no pool found in the FPM configuration - evaluating php.ini values only"
+        evaluate "fpm:$fpm" "$ver" "$b_up" "$b_mem" "$b_feb" "$b_post" "$b_upl" "$b_st" "" "$fpm"
         continue
     fi
     while IFS= read -r pool; do
@@ -364,7 +539,7 @@ for fpm in "${FPM_BINS[@]}"; do
         mem_kind=ini; maxreq=""
         # php_value first, then php_admin_value (admin wins), last line wins
         for pass in user admin pm; do
-            for o in "${ovr[@]}"; do
+            for o in ${ovr[@]+"${ovr[@]}"}; do
                 IFS='|' read -r p k d v <<<"$o"
                 if [ "$p" != "$pool" ] || [ "$k" != "$pass" ]; then continue; fi
                 case "$d" in
@@ -383,19 +558,77 @@ for fpm in "${FPM_BINS[@]}"; do
             user) extra="memory_limit is set with php_value: applications can override it with ini_set(); use php_admin_value" ;;
             ini)  [ "$mem" = "-1" ] && extra="memory_limit=-1 comes from php.ini only: applications can override it; prefer php_admin_value[memory_limit] = -1" ;;
         esac
-        evaluate "fpm:$fpm pool=[$pool]" "$ver" "$up" "$mem" "$feb" "$post" "$upl" "$st" "$extra"
-        [ -n "$maxreq" ] && say "      (info: pm.max_requests=$maxreq)"
+        evaluate "fpm:$fpm pool=[$pool]" "$ver" "$up" "$mem" "$feb" "$post" "$upl" "$st" "$extra" "$fpm"
+        # pm.max_requests = 0 is the default (workers are reused): only report a real setting
+        [ -n "$maxreq" ] && [ "$maxreq" != "0" ] && say "      (info: pm.max_requests=$maxreq)"
     done <<<"$pools"
 done
-[ "${#FPM_BINS[@]}" -gt 0 ] && check_rlimits
+
+# ---------------------------------------------------------------- running processes
+# For every running web SAPI process: (1) was its binary / mod_php library
+# replaced on disk since it started (update without restart)? (2) does it run
+# under RLIMIT_AS / RLIMIT_DATA, which must stay unlimited (CVE-2026-109618)?
+scan_processes() {
+    local p pid comm exe lim kind stale_list="" n_stale=0 rlimit_list="" n_rlimit=0 shown=0
+    for p in "$PROC_DIR"/[0-9]*; do
+        # builtin read, not `cat`: this loop visits every process of the host
+        { read -r comm < "$p/comm"; } 2>/dev/null || continue
+        pid=${p##*/}
+        case "$comm" in
+            php-fpm*|php-cgi*|lsphp*|frankenphp*) kind=bin ;;
+            apache2|httpd|httpd.*|httpd-*)
+                # only the Apache processes that actually loaded mod_php
+                if [ -r "$p/maps" ] && grep -q 'libphp[^ ]*\.so' "$p/maps" 2>/dev/null; then kind=mod; else continue; fi ;;
+            *) continue ;;
+        esac
+        if [ "$kind" = bin ]; then
+            exe=$(readlink "$p/exe" 2>/dev/null) || exe=""
+            case "$exe" in *" (deleted)") stale_list="$stale_list $pid($comm)"; n_stale=$((n_stale + 1)) ;; esac
+        elif grep -Eq 'libphp[^ ]*\.so.*\(deleted\)' "$p/maps" 2>/dev/null; then
+            stale_list="$stale_list $pid($comm)"; n_stale=$((n_stale + 1))
+        fi
+        if [ -r "$p/limits" ]; then
+            lim=$(awk '/^Max (address space|data size)/ { if ($4 != "unlimited") print $1" "$2" "$3" = "$4 }' "$p/limits")
+            if [ -n "$lim" ]; then
+                rlimit_list="$rlimit_list
+  ! pid $pid ($comm): $lim"
+                n_rlimit=$((n_rlimit + 1))
+            fi
+        fi
+    done
+    if [ "$n_stale" -gt 0 ]; then
+        STALE=$n_stale
+        say "== Running processes"
+        say "  ! $n_stale process(es) still run a PHP binary/library replaced on disk since they started:"
+        for p in $stale_list; do
+            shown=$((shown + 1))
+            [ "$shown" -le 8 ] && say "      $p"
+        done
+        [ "$n_stale" -gt 8 ] && say "      ... and $((n_stale - 8)) more"
+        say "    The vulnerable code is still in memory: RESTART (not reload) php-fpm / Apache / php-cgi / lsphp / frankenphp."
+    fi
+    if [ "$n_rlimit" -gt 0 ]; then
+        say "== Resource limits"
+        say "${rlimit_list#$'\n'}"
+        say "    RLIMIT_AS / RLIMIT_DATA must not be used (they trigger CVE-2026-109618); use a cgroup limit instead."
+    fi
+    return 0
+}
+scan_processes
 
 # ---------------------------------------------------------------- verdict
 say ""
 say "Reminder: these settings are NOT a fix. Update to 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35."
 case "$WORST" in
-    0) echo "VERDICT: PATCHED"; exit 0 ;;
-    1) echo "VERDICT: MITIGATED (interim only, still unsafe - update PHP now)"; exit 1 ;;
-    2) echo "VERDICT: UNKNOWN (EOL-VERIFY: end-of-life runtime, confirm the official/vendor backport or upgrade)"; exit 3 ;;
-    3) echo "VERDICT: EXPOSED"; exit 2 ;;
-    *) echo "VERDICT: UNKNOWN (no PHP runtime found)"; exit 3 ;;
+    0) verdict="PATCHED"; code=0 ;;
+    1) verdict="MITIGATED (interim only, still unsafe - update PHP now)"; code=1 ;;
+    2) verdict="UNKNOWN (EOL-VERIFY / UNKNOWN-BRANCH: a runtime could not be classified, confirm the official/vendor backport or upgrade)"; code=3 ;;
+    3) verdict="EXPOSED"; code=2 ;;
+    *) verdict="UNKNOWN (no PHP runtime found)"; code=3 ;;
 esac
+if [ "$STALE" -gt 0 ] && [ "$code" -ne 2 ]; then
+    verdict="EXPOSED (restart required: $STALE running process(es) still use a PHP binary replaced on disk)"
+    code=2
+fi
+echo "VERDICT: $verdict"
+exit "$code"

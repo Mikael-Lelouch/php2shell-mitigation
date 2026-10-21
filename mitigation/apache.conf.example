@@ -1,0 +1,52 @@
+# PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - Apache httpd limits
+# Source: https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+#
+# THIS IS NOT A FIX - update PHP (8.5.12 / 8.4.27 / 8.3.36 / 8.2.35).
+# Apache with mod_php is the SAPI the advisories validated end to end: it is
+# the highest-priority place to apply this file.
+#
+# Put it in server config or a vhost (e.g. /etc/apache2/conf-available/php2shell.conf
+# then `a2enconf php2shell`; RHEL: /etc/httpd/conf.d/php2shell.conf), then
+#   apachectl configtest && systemctl restart apache2      (httpd on RHEL)
+# Restart, do not just reload, so every worker is replaced.
+# Validate with:  curl -i -F a=b https://your-site/index.php   -> 403 (no uploads)
+#                 head -c 9000000 /dev/zero | curl -i --data-binary @- \
+#                      -H 'Transfer-Encoding: chunked' https://your-site/index.php -> 413
+
+# Decoded request body ceiling, enforced on chunked requests (no Content-Length)
+# too. 8 MiB without uploads; 32 MiB (33554432) if the application needs uploads.
+# Keep it >= the PHP post_max_size.
+LimitRequestBody 8388608
+
+# Bounded headers and request line.
+LimitRequestFields 50
+LimitRequestFieldSize 8190
+LimitRequestLine 8190
+
+# Slow-header / slow-body clients (needs mod_reqtimeout, enabled by default).
+<IfModule reqtimeout_module>
+    RequestReadTimeout header=20-40,MinRate=500 body=20,MinRate=500
+</IfModule>
+
+# Application without file uploads: refuse multipart outright.
+<If "%{req:Content-Type} =~ m#^multipart/form-data#i">
+    Require all denied
+</If>
+
+# mod_php only. php_admin_* cannot be overridden by .htaccess or ini_set().
+# Do NOT use php_value / php_flag for these, and make sure no directory block,
+# .htaccess or vhost puts a finite memory_limit back.
+<IfModule mod_php.c>
+    php_admin_flag  session.upload_progress.enabled off
+    php_admin_value memory_limit -1
+    php_admin_value post_max_size 8M
+    php_admin_value upload_max_filesize 7M
+    # PHP 8.5 only (the directive does not exist before 8.5):
+    #php_admin_flag fatal_error_backtraces off
+</IfModule>
+
+# Per-request php_value / php_flag (vhost, <Directory>, .htaccess) are applied
+# before request initialisation: an invalid or deprecated directive there emits
+# a diagnostic that is a confirmed CVE-2026-109619 trigger. Remove what is not
+# strictly needed (check-php2shell.sh lists the ones in /etc/apache2 and /etc/httpd).
+# Also consider `AllowOverride None` where .htaccess PHP settings are not required.

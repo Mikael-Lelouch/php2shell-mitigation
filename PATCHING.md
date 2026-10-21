@@ -15,12 +15,18 @@ These versions are preset at the top of `check-php2shell.sh` (`FIXED_8_2` … `F
 override them with environment variables if needed, then re-run the check.
 
 **Distribution backports:** Debian, Ubuntu (main archive), RHEL/AppStream and Alpine often backport
-security fixes *without* changing the upstream version number (e.g. `8.2.x-1+deb12uN`).
-In that case trust your vendor's security advisory (DSA/USN/RHSA/Alpine secdb) and the package
-changelog rather than `PHP_VERSION`; the check script compares upstream version numbers only.
+security fixes *without* changing the upstream version number (e.g. `8.2.x-1+deb12uN`). Example seen
+on Ubuntu 24.04: the fix is in package `8.3.6-0ubuntu0.24.04.13` (changelog dated 19 Oct 2026) while
+`php -r 'echo PHP_VERSION;'` still prints `8.3.6`. `PHP_VERSION` therefore cannot tell you whether you
+are patched: `check-php2shell.sh` reads the changelog of the package that owns each binary (`dpkg`,
+`rpm`) and counts the runtime as patched when it lists **both** `CVE-2026-109618` and
+`CVE-2026-109619`. Alpine ships no local changelog: use the Alpine secdb.
 
 After upgrading, **restart** (not only reload) PHP-FPM / Apache / php-cgi / FrankenPHP / LiteSpeed so
-every worker runs the new binary, then re-run `check-php2shell.sh`.
+every worker runs the new binary, then re-run `check-php2shell.sh`. A package update does not
+restart the workers on every distribution, and until it does the vulnerable code stays in memory:
+the script reports `EXPOSED (restart required)` while any process runs a binary that was replaced on
+disk (run it as root).
 
 ---
 
@@ -32,8 +38,14 @@ sudo apt-get update
 apt list --upgradable 2>/dev/null | grep -i php
 sudo apt-get install --only-upgrade 'php*'
 sudo systemctl restart 'php*-fpm'       # and/or: sudo systemctl restart apache2 (mod_php)
-# confirm the fix is in the package changelog:
-apt-get changelog php8.2-common | grep -iE 'CVE-2026-10961[89]'   # adjust to your version
+# confirm the fix is in the INSTALLED package changelog (local, no network); both ids must be listed:
+zgrep -hE '^\s+- CVE-2026-10961[89]' /usr/share/doc/php8.2-common/changelog.Debian.gz   # adjust to your version
+# before installing, the candidate's changelog:  apt-get changelog php8.2-common | grep -iE 'CVE-2026-10961[89]'
+```
+Expected output once fixed (two lines, one per CVE):
+```
+    - CVE-2026-109618
+    - CVE-2026-109619
 ```
 
 ### ondrej/php PPA (Ubuntu) / packages.sury.org (Debian)
@@ -132,6 +144,7 @@ sudo make install
 sudo systemctl restart php-fpm   # or your service / web server
 ```
 The backport branches keep the version string of their base (`8.1.34`, `8.0.30`, and `7.4.31-dev`
-on the 7.4 branch), so `check-php2shell.sh` cannot tell them apart from an unpatched build and reports
-end-of-life runtimes as `EOL-VERIFY` (exit 3). Once you have confirmed the backport is installed,
-run it with `PHP2SHELL_EOL_BACKPORTED=1`.
+on the 7.4 branch), so `check-php2shell.sh` cannot tell a source build apart from an unpatched one and
+reports end-of-life runtimes as `EOL-VERIFY` (exit 3). Once you have confirmed the backport is installed,
+run it with `PHP2SHELL_EOL_BACKPORTED=1`. EOL runtimes installed from a vendor package (e.g. Ubuntu ESM,
+Debian LTS) are resolved automatically from the package changelog.
