@@ -1,0 +1,56 @@
+# PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - nginx frontend limits
+# Source: https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w
+#
+# THIS IS NOT A FIX - update PHP (8.5.12 / 8.4.27 / 8.3.36 / 8.2.35).
+#
+# The advisory asks for request limits enforced at the web server / proxy, also
+# for requests WITHOUT a usable Content-Length (chunked bodies). nginx counts
+# the decoded body of chunked requests against client_max_body_size, so a
+# single limit covers both cases (checked with `nginx -t` and curl on 1.24).
+#
+# Install: put the http{} part in /etc/nginx/conf.d/php2shell.conf (included
+# inside http {}), add the location{} lines to every PHP location, then
+#   nginx -t && systemctl reload nginx
+# Validate with:  curl -i -F a=b https://your-site/index.php   -> 415 (no uploads)
+#                 head -c 9000000 /dev/zero | curl -i --data-binary @- \
+#                      -H 'Transfer-Encoding: chunked' https://your-site/index.php -> 413
+
+# ---- http {} context -------------------------------------------------------
+
+# Decoded request body ceiling (chunked requests included). Keep it >= the
+# PHP post_max_size you set: 8m without uploads, 32m if the application needs
+# uploads (then use 32m here too).
+client_max_body_size 8m;
+
+# Small, bounded headers (also limits the headers of each multipart part that
+# reach nginx as request headers).
+client_header_buffer_size 4k;
+large_client_header_buffers 4 8k;
+
+# Slow-body / slow-header clients hold a worker while PHP waits for input.
+client_header_timeout 10s;
+client_body_timeout 10s;
+
+# 1 when the request is multipart/form-data.
+map $content_type $php2shell_multipart {
+    default                  0;
+    "~*^multipart/form-data" 1;
+}
+
+# ---- inside every `location ~ \.php$ { ... }` (or equivalent) -------------
+
+#    # Application without file uploads: refuse multipart outright.
+#    # (`if` containing only `return` is safe in a location.)
+#    if ($php2shell_multipart) {
+#        return 415;
+#    }
+#
+#    # Do NOT set invalid / deprecated directives per request: diagnostics
+#    # emitted before request initialisation are a confirmed CVE-2026-109619
+#    # trigger. Review any of these and remove what is not strictly needed:
+#    #   fastcgi_param PHP_VALUE       "...";
+#    #   fastcgi_param PHP_ADMIN_VALUE "...";
+
+# What nginx cannot enforce: multipart part count, field count and nesting
+# depth. Use PHP for those (mitigation/php.ini.snippet: max_file_uploads,
+# max_input_vars, max_input_nesting_level) or a WAF in front.

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: shellcheck -x check-php2shell.sh tests/run-tests.sh
+      - name: Hermetic tests
+        run: bash tests/run-tests.sh
+
+  # Real binaries, not stubs: guards the parsing of `php-fpm -tt`, php-cgi and
+  # the dpkg changelog lookup against format changes. The verdict itself depends
+  # on how current the runner image is, so only the structure is asserted.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install real PHP runtimes
+        run: sudo apt-get update && sudo apt-get install -y php-cli php-fpm php-cgi
+      - name: Run the check as root
+        run: |
+          set +e
+          out=$(sudo bash check-php2shell.sh)
+          rc=$?
+          printf '%s\n' "$out"
+          case "$rc" in 0|1|2|3) ;; *) echo "unexpected exit code $rc"; exit 1 ;; esac
+          grep -q '^== PHP CLI' <<<"$out"
+          grep -q '^== php-cgi' <<<"$out"
+          grep -q '^== PHP-FPM' <<<"$out"
+          grep -q 'pool=\[www\]' <<<"$out"
+          grep -q '^VERDICT: ' <<<"$out"

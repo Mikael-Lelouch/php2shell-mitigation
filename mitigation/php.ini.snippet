@@ -40,16 +40,27 @@ memory_limit = -1
 
 ; Keep request bodies small: 8M if the application needs no file uploads,
 ; 32M if it does. upload_max_filesize must stay BELOW post_max_size.
+; WARNING: the active lines below cap uploads at 7M. A site that accepts
+; larger uploads (CMS media library, imports...) must use the 32M block instead.
 post_max_size = 8M
 upload_max_filesize = 7M
 ; Application with uploads:
 ;post_max_size = 32M
 ;upload_max_filesize = 30M
 
+; Optional: bound the input parsing that CVE-2026-109618 abuses. The advisory
+; says to reduce these (PHP defaults: 64 / 1000 / 20); the values below are
+; examples, lower them only to what your application really needs.
+;max_input_nesting_level = 16
+;max_input_vars = 1000
+;max_file_uploads = 20
+
 ; Also enforce limits at the web server / proxy (decoded body size, field
 ; count, multipart part count, header count, nesting depth), including
 ; requests without a usable Content-Length. If multipart/form-data is not
-; used by the application, block it at the frontend.
+; used by the application, block it at the frontend:
+;   nginx  : mitigation/nginx.conf.example
+;   Apache : mitigation/apache.conf.example
 
 ; Optional (not in the php.net notice, general hardening):
 ;session.use_strict_mode = 1
