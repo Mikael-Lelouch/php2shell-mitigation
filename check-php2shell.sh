@@ -32,10 +32,10 @@ set -u
 # "not patched" and only the mitigation settings are evaluated.
 # Branches not listed here (8.1 and older) are end-of-life: no official fix.
 # --------------------------------------------------------------------------
-FIXED_8_2="${FIXED_8_2:-}"
-FIXED_8_3="${FIXED_8_3:-}"
-FIXED_8_4="${FIXED_8_4:-}"
-FIXED_8_5="${FIXED_8_5:-}"
+FIXED_8_2="${FIXED_8_2:-8.2.35}"
+FIXED_8_3="${FIXED_8_3:-8.3.36}"
+FIXED_8_4="${FIXED_8_4:-8.4.27}"
+FIXED_8_5="${FIXED_8_5:-8.5.12}"
 
 QUIET=0
 [ "${1:-}" = "-q" ] && QUIET=1

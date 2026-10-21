@@ -39,14 +39,14 @@ published with the release ([php.net](https://www.php.net/)).
 ### Fixed versions
 | Branch | Fixed version | Status |
 |---|---|---|
-| 8.5 | pending | release scheduled 21 Oct 2026 14:00 UTC |
-| 8.4 | pending | release scheduled 21 Oct 2026 14:00 UTC |
-| 8.3 | pending | release scheduled 21 Oct 2026 14:00 UTC |
-| 8.2 | pending | release scheduled 21 Oct 2026 14:00 UTC |
+| 8.5 | **8.5.12** | released 21 Oct 2026 (security) |
+| 8.4 | **8.4.27** | released 21 Oct 2026 (security) |
+| 8.3 | **8.3.36** | released 21 Oct 2026 (security) |
+| 8.2 | **8.2.35** | released 21 Oct 2026 (security) |
 | ≤ 8.1 | none | end-of-life |
 
-Third-party write-ups expect 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 — **unconfirmed**; check
-[php.net](https://www.php.net/) and the [ChangeLog](https://www.php.net/ChangeLog-8.php).
+Confirmed on [php.net](https://www.php.net/) (security releases of 21 Oct 2026); details in the
+[ChangeLog](https://www.php.net/ChangeLog-8.php).
 
 ### Temporary mitigation (until you patch)
 These settings disable the suspected code path. PHP core developers state that patching is the only
@@ -90,8 +90,8 @@ mod_php runtimes, prints each version and the effective values, then a verdict:
 | 2 | `EXPOSED` | at least one runtime unpatched and unmitigated |
 | 3 | `UNKNOWN` | no PHP found |
 
-Set fixed versions once released: edit `FIXED_8_2`…`FIXED_8_5` at the top, or
-`sudo FIXED_8_3=8.3.X bash check-php2shell.sh`. Containers: `docker exec -i <c> bash -s < check-php2shell.sh`.
+Fixed versions are preset (`FIXED_8_2`…`FIXED_8_5` at the top); override if needed, e.g.
+`sudo FIXED_8_3=8.3.36 bash check-php2shell.sh`. Containers: `docker exec -i <c> bash -s < check-php2shell.sh`.
 Distro backports may keep the old upstream version number — see [PATCHING.md](PATCHING.md).
 
 ### Patch
@@ -126,11 +126,14 @@ Les détails, versions touchées et versions corrigées seront publiés avec la 
 ### Versions corrigées
 | Branche | Version corrigée | Statut |
 |---|---|---|
-| 8.5 / 8.4 / 8.3 / 8.2 | en attente | release prévue le 21 oct. 2026 à 14:00 UTC |
+| 8.5 | **8.5.12** | publiée le 21 oct. 2026 (sécurité) |
+| 8.4 | **8.4.27** | publiée le 21 oct. 2026 (sécurité) |
+| 8.3 | **8.3.36** | publiée le 21 oct. 2026 (sécurité) |
+| 8.2 | **8.2.35** | publiée le 21 oct. 2026 (sécurité) |
 | ≤ 8.1 | aucune | fin de vie |
 
-Des sources tierces annoncent 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 — **non confirmé** ; vérifiez sur
-[php.net](https://www.php.net/) et le [ChangeLog](https://www.php.net/ChangeLog-8.php).
+Confirmé sur [php.net](https://www.php.net/) (releases de sécurité du 21 oct. 2026) ; détails dans le
+[ChangeLog](https://www.php.net/ChangeLog-8.php).
 
 ### Mitigation temporaire (en attendant le patch)
 Ces réglages désactivent le chemin de code suspecté. Les développeurs de PHP rappellent que seule la mise
@@ -162,8 +165,8 @@ sudo bash check-php2shell.sh      # lecture seule
 ```
 Le script détecte PHP CLI, PHP-FPM (y compris les surcharges `php_admin_flag`/`php_flag` par pool) et
 mod_php (Debian), affiche versions et valeurs effectives, puis un verdict : `PATCHED` (code 0),
-`MITIGATED` (1), `EXPOSED` (2), `UNKNOWN` (3). Renseignez les versions corrigées dès leur sortie
-(`FIXED_8_2`…`FIXED_8_5` en tête du script, ou en variables d'environnement). Attention : les rétroportages
+`MITIGATED` (1), `EXPOSED` (2), `UNKNOWN` (3). Les versions corrigées sont préremplies
+(`FIXED_8_2`…`FIXED_8_5` en tête du script, modifiables en variables d'environnement). Attention : les rétroportages
 des distributions peuvent conserver l'ancien numéro de version — voir [PATCHING.md](PATCHING.md).
 
 ### Patch

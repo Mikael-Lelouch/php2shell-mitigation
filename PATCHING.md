@@ -1,18 +1,15 @@
 # Patching PHP2Shell (CVE-2026-109618 / CVE-2026-109619)
 
-> **Status (21 Oct 2026, 13:20 UTC):** the official fix is **pending**. php.net announced a
-> security release for **Wednesday 21 October 2026, 14:00 UTC** and says fixed versions will be
-> published with the release. Do **not** rely on version numbers until they appear on
-> <https://www.php.net/> and <https://www.php.net/ChangeLog-8.php>.
->
-> Third-party write-ups expect 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 — **unconfirmed by PHP at the time of writing**.
+> **Status (22 Oct 2026):** the official fix is **out**. php.net published security releases on
+> 21 October 2026: **8.5.12 / 8.4.27 / 8.3.36 / 8.2.35**. See <https://www.php.net/> and
+> <https://www.php.net/ChangeLog-8.php>.
 > The 24 September 2026 releases (8.5.11 / 8.4.26 / 8.3.35 / 8.2.34) predate the announcement
 > and do not contain the fix.
 >
 > PHP 8.1 and older are end-of-life and will not receive an official fix: move to a supported branch.
 
-Once fixed versions exist, put them at the top of `check-php2shell.sh` (`FIXED_8_2` … `FIXED_8_5`)
-or pass them as environment variables, then re-run the check.
+These versions are preset at the top of `check-php2shell.sh` (`FIXED_8_2` … `FIXED_8_5`);
+override them with environment variables if needed, then re-run the check.
 
 **Distribution backports:** Debian, Ubuntu (main archive), RHEL/AppStream and Alpine often backport
 security fixes *without* changing the upstream version number (e.g. `8.2.x-1+deb12uN`).
