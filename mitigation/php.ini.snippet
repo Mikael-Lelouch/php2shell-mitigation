@@ -1,0 +1,22 @@
+; PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - temporary mitigation
+; Drop this file into your conf.d directory, e.g.:
+;   Debian/Ubuntu : /etc/php/<X.Y>/{cli,fpm,apache2}/conf.d/99-php2shell.ini
+;   RHEL / Remi   : /etc/php.d/99-php2shell.ini  (or /etc/opt/remi/phpXY/php.d/)
+;   Alpine        : /etc/php<XY>/conf.d/99-php2shell.ini
+;   Docker (php)  : /usr/local/etc/php/conf.d/99-php2shell.ini
+;
+; THIS IS NOT A FIX. The PHP project's position is that upgrading PHP is the
+; only real mitigation. Apply this only until you can install a patched build.
+;
+; After editing: reload PHP-FPM (systemctl reload phpX.Y-fpm / php-fpm)
+; or restart Apache when using mod_php.
+
+; Disable session upload progress tracking (the vulnerable code path).
+; Side effect: native $_SESSION upload-progress bars stop working.
+; Normal file uploads keep working.
+session.upload_progress.enabled = 0
+
+; Reject uninitialised session IDs (recommended by PHP for every site).
+; Note: has no effect with session handlers that do not implement
+; ID validation (e.g. some Redis / database handlers).
+session.use_strict_mode = 1

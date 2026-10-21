@@ -1,0 +1,27 @@
+; PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - PHP-FPM pool mitigation
+;
+; PHP-FPM workers may not use the same php.ini as the CLI, and pools can
+; override php.ini values. Add these two lines to EVERY pool that serves PHP,
+; e.g. /etc/php/8.3/fpm/pool.d/www.conf (Debian/Ubuntu),
+;      /etc/php-fpm.d/www.conf (RHEL),
+;      /etc/php83/php-fpm.d/www.conf (Alpine),
+;      /usr/local/etc/php-fpm.d/www.conf (Docker official image).
+;
+; php_admin_flag values cannot be overridden by ini_set() or .user.ini.
+;
+; Then validate and reload:
+;   php-fpm8.3 -t && systemctl reload php8.3-fpm     (Debian/Ubuntu)
+;   php-fpm -t && systemctl reload php-fpm           (RHEL)
+;   php-fpm83 -t && rc-service php-fpm83 reload      (Alpine)
+;   docker compose restart <service>                 (Docker)
+;
+; Finally confirm the value inside a request served BY FPM (not the CLI),
+; e.g. a temporary page printing ini_get(), removed right after the check.
+;
+; THIS IS NOT A FIX - upgrade PHP as soon as a patched build is available.
+
+[www]
+; ... existing pool settings ...
+
+php_admin_flag[session.upload_progress.enabled] = off
+php_admin_flag[session.use_strict_mode] = on
