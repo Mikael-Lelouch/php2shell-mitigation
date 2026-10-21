@@ -1,12 +1,15 @@
 # Patching PHP2Shell (CVE-2026-109618 / CVE-2026-109619)
 
-> **Status (22 Oct 2026):** the official fix is **out**. php.net published security releases on
-> 21 October 2026: **8.5.12 / 8.4.27 / 8.3.36 / 8.2.35**. See <https://www.php.net/> and
-> <https://www.php.net/ChangeLog-8.php>.
-> The 24 September 2026 releases (8.5.11 / 8.4.26 / 8.3.35 / 8.2.34) predate the announcement
-> and do not contain the fix.
+> **Status (22 Oct 2026): official fix released.** php.net published security releases on
+> 21 October 2026: **8.5.12 / 8.4.27 / 8.3.36 / 8.2.35**
+> ([notice](https://www.php.net/archive/2026.php#2026-10-21-1), [ChangeLog](https://www.php.net/ChangeLog-8.php)).
+> Vulnerable: **< 8.2.35, < 8.3.36, < 8.4.27, < 8.5.12** (both
+> [GHSA-w8hw-w9fx-j79w](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w) and
+> [GHSA-6wmf-4rv5-p3rp](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp)).
 >
-> PHP 8.1 and older are end-of-life and will not receive an official fix: move to a supported branch.
+> PHP 8.1 and older get no release, but the PHP security team published **minimal source backports
+> for 7.4, 8.0 and 8.1** ([below](#end-of-life-branches-74--80--81-official-source-backports)).
+> Linux distributions and LTS vendors received the patches in advance: check your vendor first.
 
 These versions are preset at the top of `check-php2shell.sh` (`FIXED_8_2` … `FIXED_8_5`);
 override them with environment variables if needed, then re-run the check.
@@ -16,7 +19,8 @@ security fixes *without* changing the upstream version number (e.g. `8.2.x-1+deb
 In that case trust your vendor's security advisory (DSA/USN/RHSA/Alpine secdb) and the package
 changelog rather than `PHP_VERSION`; the check script compares upstream version numbers only.
 
-Always reload PHP-FPM / restart Apache after upgrading, then re-run `check-php2shell.sh`.
+After upgrading, **restart** (not only reload) PHP-FPM / Apache / php-cgi / FrankenPHP / LiteSpeed so
+every worker runs the new binary, then re-run `check-php2shell.sh`.
 
 ---
 
@@ -27,7 +31,7 @@ Always reload PHP-FPM / restart Apache after upgrading, then re-run `check-php2s
 sudo apt-get update
 apt list --upgradable 2>/dev/null | grep -i php
 sudo apt-get install --only-upgrade 'php*'
-sudo systemctl reload 'php*-fpm'        # or: sudo systemctl restart apache2 (mod_php)
+sudo systemctl restart 'php*-fpm'       # and/or: sudo systemctl restart apache2 (mod_php)
 # confirm the fix is in the package changelog:
 apt-get changelog php8.2-common | grep -iE 'CVE-2026-10961[89]'   # adjust to your version
 ```
@@ -37,7 +41,7 @@ apt-get changelog php8.2-common | grep -iE 'CVE-2026-10961[89]'   # adjust to yo
 sudo apt-get update
 apt-cache policy php8.3-fpm             # check the candidate is the fixed upstream version
 sudo apt-get install --only-upgrade 'php8.3*'   # repeat for every installed X.Y
-sudo systemctl reload php8.3-fpm
+sudo systemctl restart php8.3-fpm
 ```
 
 ## RHEL / AlmaLinux / Rocky Linux
@@ -46,22 +50,25 @@ sudo systemctl reload php8.3-fpm
 ```bash
 sudo dnf check-update 'php*'
 sudo dnf update 'php*'
-sudo systemctl reload php-fpm
+sudo systemctl restart php-fpm        # and/or: sudo systemctl restart httpd
 ```
 
 ### Remi repository (`rpms.remirepo.net`)
-> According to Sansec (citing the PHP Foundation, 21 Oct 2026 08:48 UTC), the volunteer-run Remi
-> repository **will not publish updates on 21 October**. Expect a delay; apply the mitigations meanwhile.
+> **php.net (21 Oct 2026):** "If you rely on the volunteer-maintained rpms.remirepo.net, we urge you
+> to switch to distribution packages or build from source, so you can immediately apply updates.
+> The repo will not have updates today." Until Remi ships the fix, apply the
+> [interim measures](README.md#if-you-cannot-update-immediately-official-interim-measures) and
+> move to AppStream packages or a source build. When Remi updates are available:
 
 ```bash
 # module stream (php:remi-8.3 etc.)
 sudo dnf clean metadata
 sudo dnf update 'php*'
-sudo systemctl reload php-fpm
+sudo systemctl restart php-fpm        # and/or: sudo systemctl restart httpd
 
 # parallel SCL installs (php83-php-*, php84-php-*)
 sudo dnf update 'php83-php*'
-sudo systemctl reload php83-php-fpm
+sudo systemctl restart php83-php-fpm
 ```
 
 ## Alpine Linux
@@ -69,7 +76,7 @@ sudo systemctl reload php83-php-fpm
 apk update
 apk version -l '<' | grep -i php          # show outdated php packages
 apk upgrade 'php83*'                      # or php82* / php84* / php85*
-rc-service php-fpm83 reload               # OpenRC; in containers restart the container
+rc-service php-fpm83 restart              # OpenRC; in containers restart the container
 ```
 Alpine stable branches may ship the fix later than upstream; check <https://security.alpinelinux.org/>.
 
@@ -79,8 +86,8 @@ The image tag pins the PHP version. Bump the tag to the fixed release and rebuil
 ```dockerfile
 # Before
 FROM php:8.3.35-fpm
-# After (replace with the real fixed version once released)
-FROM php:8.3.<FIXED>-fpm
+# After
+FROM php:8.3.36-fpm        # 8.2.35 / 8.4.27 / 8.5.12 for the other branches
 ```
 ```bash
 docker build --pull --no-cache -t myapp:php-fixed .
@@ -92,8 +99,39 @@ upstream releases: `docker pull` the tag, check `php -v`, then rebuild/recreate.
 Check a container with: `docker exec -i <container> bash -s < check-php2shell.sh`
 (on Alpine-based images install bash first, or run the checks manually).
 
-## From source
+## From source (supported branches)
 ```bash
-# after the release, from https://www.php.net/downloads.php (verify signatures)
+# https://www.php.net/downloads.php - verify the tarball signature / checksum
+curl -fLO https://www.php.net/distributions/php-8.4.27.tar.xz
+tar xf php-8.4.27.tar.xz && cd php-8.4.27
 ./configure <your usual flags> && make -j"$(nproc)" && sudo make install
+sudo systemctl restart php-fpm   # or your service / web server
+php -v
 ```
+Same for 8.2.35, 8.3.36 and 8.5.12. Windows source and binaries are on the same downloads page.
+
+## End-of-life branches (7.4 / 8.0 / 8.1): official source backports
+PHP 8.1 and older no longer receive releases. Prefer, in order: your distribution / LTS vendor's
+backported packages, an upgrade to a supported branch, or the official minimal source backports
+published by the PHP security team:
+
+| Branch | Backport branch |
+|---|---|
+| 7.4 | [`PHP-7.4-CVE-2026-109618-109619`](https://github.com/php/php-src/tree/PHP-7.4-CVE-2026-109618-109619) |
+| 8.0 | [`PHP-8.0-CVE-2026-109618-109619`](https://github.com/php/php-src/tree/PHP-8.0-CVE-2026-109618-109619) |
+| 8.1 | [`PHP-8.1-CVE-2026-109618-109619`](https://github.com/php/php-src/tree/PHP-8.1-CVE-2026-109618-109619) |
+
+```bash
+# example for 8.1 (replace 8.1 with 8.0 or 7.4)
+git clone --depth 1 -b PHP-8.1-CVE-2026-109618-109619 https://github.com/php/php-src.git php-8.1-cve
+cd php-8.1-cve
+./buildconf --force
+./configure <the flags of your current build>   # php -i | grep -i "configure command"
+make -j"$(nproc)"
+sudo make install
+sudo systemctl restart php-fpm   # or your service / web server
+```
+The backport branches keep the version string of their base (`8.1.34`, `8.0.30`, and `7.4.31-dev`
+on the 7.4 branch), so `check-php2shell.sh` cannot tell them apart from an unpatched build and reports
+end-of-life runtimes as `EOL-VERIFY` (exit 3). Once you have confirmed the backport is installed,
+run it with `PHP2SHELL_EOL_BACKPORTED=1`.

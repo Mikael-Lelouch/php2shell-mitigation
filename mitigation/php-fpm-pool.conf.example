@@ -1,27 +1,49 @@
-; PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - PHP-FPM pool mitigation
+; PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - PHP-FPM pool interim measures
+; Source: https://www.php.net/archive/2026.php#2026-10-21-1
 ;
-; PHP-FPM workers may not use the same php.ini as the CLI, and pools can
-; override php.ini values. Add these two lines to EVERY pool that serves PHP,
-; e.g. /etc/php/8.3/fpm/pool.d/www.conf (Debian/Ubuntu),
-;      /etc/php-fpm.d/www.conf (RHEL),
-;      /etc/php83/php-fpm.d/www.conf (Alpine),
-;      /usr/local/etc/php-fpm.d/www.conf (Docker official image).
+; THIS IS NOT A FIX - update PHP (8.5.12 / 8.4.27 / 8.3.36 / 8.2.35).
 ;
-; php_admin_flag values cannot be overridden by ini_set() or .user.ini.
+; Add these lines to EVERY pool that serves PHP, e.g.
+;   /etc/php/8.4/fpm/pool.d/www.conf      (Debian/Ubuntu)
+;   /etc/php-fpm.d/www.conf               (RHEL)
+;   /etc/php84/php-fpm.d/www.conf         (Alpine)
+;   /usr/local/etc/php-fpm.d/www.conf     (Docker official image)
 ;
-; Then validate and reload:
-;   php-fpm8.3 -t && systemctl reload php8.3-fpm     (Debian/Ubuntu)
-;   php-fpm -t && systemctl reload php-fpm           (RHEL)
-;   php-fpm83 -t && rc-service php-fpm83 reload      (Alpine)
-;   docker compose restart <service>                 (Docker)
+; php_admin_value / php_admin_flag cannot be overridden by ini_set() or
+; .user.ini. Pool values are applied when the worker starts.
+; Also remove from the web server any per-request PHP_VALUE /
+; PHP_ADMIN_VALUE (e.g. nginx "fastcgi_param PHP_VALUE ...") that sets
+; invalid or deprecated directives: diagnostics emitted before request
+; initialisation are a confirmed CVE-2026-109619 trigger.
 ;
-; Finally confirm the value inside a request served BY FPM (not the CLI),
+; Then validate and RESTART (not just reload) so every worker is replaced:
+;   php-fpm8.4 -t && systemctl restart php8.4-fpm     (Debian/Ubuntu)
+;   php-fpm -t && systemctl restart php-fpm           (RHEL)
+;   php-fpm84 -t && rc-service php-fpm84 restart      (Alpine)
+;   docker compose restart <service>                  (Docker)
+; Finally confirm the values inside a request served BY FPM (not the CLI),
 ; e.g. a temporary page printing ini_get(), removed right after the check.
-;
-; THIS IS NOT A FIX - upgrade PHP as soon as a patched build is available.
 
 [www]
 ; ... existing pool settings ...
 
+; CVE-2026-109619: session upload progress paths
 php_admin_flag[session.upload_progress.enabled] = off
-php_admin_flag[session.use_strict_mode] = on
+
+; CVE-2026-109618: no controllable PHP memory limit failure.
+; Bound memory with a cgroup / container limit instead (never RLIMIT_AS /
+; RLIMIT_DATA). No other file may set a finite memory_limit again.
+php_admin_value[memory_limit] = -1
+
+; Small request bodies: 8M without uploads, 32M with uploads;
+; upload_max_filesize below post_max_size.
+php_admin_value[post_max_size] = 8M
+php_admin_value[upload_max_filesize] = 7M
+;php_admin_value[post_max_size] = 32M
+;php_admin_value[upload_max_filesize] = 30M
+
+; PHP 8.5 ONLY (directive does not exist on older branches - leave it out there):
+;php_admin_flag[fatal_error_backtraces] = off
+
+; Optional, if performance is not a concern: a worker never serves a 2nd request
+;pm.max_requests = 1

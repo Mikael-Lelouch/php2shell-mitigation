@@ -1,22 +1,55 @@
-; PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - temporary mitigation
-; Drop this file into your conf.d directory, e.g.:
-;   Debian/Ubuntu : /etc/php/<X.Y>/{cli,fpm,apache2}/conf.d/99-php2shell.ini
-;   RHEL / Remi   : /etc/php.d/99-php2shell.ini  (or /etc/opt/remi/phpXY/php.d/)
+; PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - official interim measures
+; Source: https://www.php.net/archive/2026.php#2026-10-21-1
+;
+; THIS IS NOT A FIX. PHP: "There are no complete mitigations, updating is the
+; only safe choice." Update to 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 (or the
+; official 7.4 / 8.0 / 8.1 source backports). These settings only reduce
+; exposure to specific attack paths.
+;
+; Drop this file into the conf.d directory of EVERY web SAPI, e.g.:
+;   Debian/Ubuntu : /etc/php/<X.Y>/{fpm,apache2,cgi}/conf.d/99-php2shell.ini
+;   RHEL          : /etc/php.d/99-php2shell.ini
 ;   Alpine        : /etc/php<XY>/conf.d/99-php2shell.ini
 ;   Docker (php)  : /usr/local/etc/php/conf.d/99-php2shell.ini
+; PHP 8.5 only: also install php85-only.ini (fatal_error_backtraces = 0).
 ;
-; THIS IS NOT A FIX. The PHP project's position is that upgrading PHP is the
-; only real mitigation. Apply this only until you can install a patched build.
+; php.ini is startup configuration: applications can still override
+; memory_limit with ini_set(). For FPM also add the php_admin_* lines from
+; php-fpm-pool.conf.example (Apache: php_admin_value / php_admin_flag in the
+; vhost) so the values cannot be overridden. Do NOT rely on ini_set() or
+; .user.ini for any of these settings.
 ;
-; After editing: reload PHP-FPM (systemctl reload phpX.Y-fpm / php-fpm)
-; or restart Apache when using mod_php.
+; Then RESTART EVERY WORKER (systemctl restart phpX.Y-fpm / apache2 / httpd).
 
-; Disable session upload progress tracking (the vulnerable code path).
-; Side effect: native $_SESSION upload-progress bars stop working.
-; Normal file uploads keep working.
+; --- CVE-2026-109619 (RCE via stale global state) -------------------------
+; Blocks the confirmed session upload progress paths (not other variants).
+; Side effect: native $_SESSION upload-progress bars stop working; normal
+; uploads keep working. PHP suggests keeping it off even after patching if
+; you don't use the feature.
 session.upload_progress.enabled = 0
 
-; Reject uninitialised session IDs (recommended by PHP for every site).
-; Note: has no effect with session handlers that do not implement
-; ID validation (e.g. some Redis / database handlers).
-session.use_strict_mode = 1
+; --- CVE-2026-109618 (RCE via OOM corruption) ------------------------------
+; Removes the controllable PHP memory limit failure. An underlying allocation
+; failure can still reach the vulnerable path. Check that no pool, directory
+; or application setting puts a finite limit back.
+; Bound memory instead with a container / cgroup limit (memory.max), ideally
+; one that kills only the affected worker.
+; Do NOT use RLIMIT_AS / RLIMIT_DATA (ulimit -v, systemd LimitAS=/LimitDATA=):
+; they make mmap() fail and trigger the vulnerable path.
+memory_limit = -1
+
+; Keep request bodies small: 8M if the application needs no file uploads,
+; 32M if it does. upload_max_filesize must stay BELOW post_max_size.
+post_max_size = 8M
+upload_max_filesize = 7M
+; Application with uploads:
+;post_max_size = 32M
+;upload_max_filesize = 30M
+
+; Also enforce limits at the web server / proxy (decoded body size, field
+; count, multipart part count, header count, nesting depth), including
+; requests without a usable Content-Length. If multipart/form-data is not
+; used by the application, block it at the frontend.
+
+; Optional (not in the php.net notice, general hardening):
+;session.use_strict_mode = 1
