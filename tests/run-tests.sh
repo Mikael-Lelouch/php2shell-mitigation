@@ -86,10 +86,15 @@ changelog() { # package, text -> $E/doc/<package>/changelog.Debian.gz
     printf '%s\n' "$2" | gzip -c >"$E/doc/$1/changelog.Debian.gz"
 }
 
+SCRIPT_ARGS=()
+
+# SIGPIPE is ignored on purpose: GitHub runners and many supervisors start their
+# children that way, and then any pipeline whose reader exits early makes the
+# writer print "write error: Broken pipe" on stderr. check() fails on that noise.
 run() { # extra env assignments via "$@" are passed before the script
-    OUT=$(env PHP2SHELL_BIN_DIRS="$E/bin" PHP2SHELL_SBIN_DIRS="$E/sbin" \
+    OUT=$( (trap '' PIPE; exec env PHP2SHELL_BIN_DIRS="$E/bin" PHP2SHELL_SBIN_DIRS="$E/sbin" \
         PHP2SHELL_ETC="$E/etc" PHP2SHELL_DOC_DIR="$E/doc" PHP2SHELL_PROC="${PROC_OVERRIDE:-$E/proc}" \
-        PATH="$E/path:$PATH" "$@" bash "$SCRIPT" 2>&1)
+        PATH="$E/path:$PATH" "$@" bash "$SCRIPT" ${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}) 2>&1 )
     RC=$?
 }
 
@@ -100,6 +105,7 @@ check() { # name expected-rc pattern... (every pattern must appear in the output
     for pat in "$@"; do
         printf '%s' "$OUT" | grep -Eq -- "$pat" || ok=0
     done
+    if printf '%s' "$OUT" | grep -Eq 'write error|Broken pipe'; then ok=0; name="$name [stderr noise: write error]"; fi
     if [ "$ok" -eq 1 ]; then
         PASS=$((PASS + 1))
         printf 'ok    %s\n' "$name"
@@ -145,6 +151,8 @@ new_env; stub_cli php8.3 8.3.37RC1 1 128M n/a 8M 2M 0; run
 check "pre-release of a LATER version is fine" 0 'PATCHED'
 new_env; stub_cli php8.3 8.3.36-1+deb12u1 1 128M n/a 8M 2M 0; run
 check "distro suffix after a fixed version is PATCHED" 0 'PATCHED'
+new_env; stub_cli php8.2 8.2.100 1 128M n/a 8M 2M 0; run
+check "version compare is numeric, not lexical (8.2.100 >= 8.2.35)" 0 'PATCHED'
 
 new_env; stub_cli php8.6 8.6.0RC4 1 128M 1 8M 2M 0; run
 check "unknown newer branch is UNKNOWN, not EXPOSED" 3 'UNKNOWN-BRANCH' 'VERDICT: UNKNOWN'
@@ -213,6 +221,32 @@ EOF
 chmod +x "$E/path/rpm"
 run
 check "rpm changelog listing both CVEs is a PATCHED vendor backport" 0 'PATCHED' 'vendor backport: the changelog of php-cli-8.2.20-1.el9'
+
+# A Debian changelog is bigger than the 64 KiB pipe buffer, with the CVE ids at the top:
+# `printf "$text" | grep -q` used to print "write error: Broken pipe" here.
+new_env; stub_cli php8.3 8.3.6 1 128M n/a 8M 2M 0
+stub_dpkg_owner php8.3-cli
+mkdir -p "$E/doc/php8.3-cli"
+{ printf '    - CVE-2026-109618\n    - CVE-2026-109619\n'
+  yes 'php8.3 (8.3.6-0ubuntu0.24.04.1) noble-security; older entry, filler to exceed the pipe buffer' | head -n 3000
+} | gzip -c >"$E/doc/php8.3-cli/changelog.Debian.gz"
+SCRIPT_ARGS=(-q); run; SCRIPT_ARGS=()
+check "large changelog (>64 KiB), SIGPIPE ignored: clean -q output" 0 '^VERDICT: PATCHED$'
+run
+check "large changelog (>64 KiB), SIGPIPE ignored: vendor backport detected" 0 'vendor backport'
+
+# /usr/bin holds thousands of files: discovery must not fork per file (it did, 5 times: ~25 s)
+new_env; stub_cli php8.3 8.3.36 1 128M n/a 8M 2M 0
+for i in $(seq 1 2500); do : >"$E/bin/tool-$i"; done
+chmod +x "$E"/bin/tool-*      # executable: the old code only forked for files that passed [ -x ]
+T0=$SECONDS
+run
+T1=$((SECONDS - T0))
+if [ "$T1" -le 8 ] && [ "$RC" -eq 0 ]; then
+    PASS=$((PASS + 1)); echo "ok    2500 files in a bin dir are scanned quickly (${T1}s)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL  2500 files in a bin dir took ${T1}s (limit 8s), rc=$RC"
+fi
 
 # ---------------------------------------------------------------- PHP-FPM pools (php-fpm -tt)
 new_env
@@ -285,9 +319,14 @@ run
 check "RLIMIT_AS on a running FPM process is reported" 0 'pid 123 \(php-fpm8.3\)' 'RLIMIT_AS'
 
 # ---------------------------------------------------------------- CLI interface
-OUT=$(bash "$SCRIPT" -q 2>&1 </dev/null); RC=$?
-check "-q prints only the verdict" "$RC" '^VERDICT: '
-if [ "$(printf '%s\n' "$OUT" | wc -l)" -eq 1 ]; then PASS=$((PASS + 1)); echo "ok    -q output is a single line"; else FAIL=$((FAIL + 1)); echo "FAIL  -q output is a single line"; fi
+new_env; stub_cli php8.3 8.3.36 1 128M n/a 8M 2M 0
+SCRIPT_ARGS=(-q); run; SCRIPT_ARGS=()
+check "-q prints only the verdict" 0 '^VERDICT: PATCHED$'
+if [ "$(printf '%s\n' "$OUT" | wc -l)" -eq 1 ]; then
+    PASS=$((PASS + 1)); echo "ok    -q output is a single line"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL  -q output is a single line"; printf '%s\n' "$OUT" | sed 's/^/      | /'
+fi
 
 OUT=$(bash "$SCRIPT" --version 2>&1); RC=$?
 check "--version" 0 '^check-php2shell.sh [0-9]+\.[0-9]+\.[0-9]+$'

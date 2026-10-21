@@ -168,8 +168,22 @@ fixed_for() { # $1 = X.Y.Z[suffix] -> fixed version of its branch, "EOL", or "" 
     echo "${!var:-}"
 }
 
-version_ge() { # $1 >= $2 ?
-    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+# Pure bash on purpose (no sort | head pipe): a pipeline whose reader exits early
+# prints "write error: Broken pipe" on stderr when SIGPIPE is ignored, which is how
+# some CI runners and supervisors start their children.
+version_ge() { # $1 >= $2 ? dotted numeric versions
+    local -a a b
+    local i x y
+    IFS=. read -r -a a <<<"$1"
+    IFS=. read -r -a b <<<"$2"
+    for i in 0 1 2 3; do
+        x=${a[i]:-0}; y=${b[i]:-0}
+        [[ $x =~ ^[0-9]+$ ]] || x=0
+        [[ $y =~ ^[0-9]+$ ]] || y=0
+        if ((10#$x > 10#$y)); then return 0; fi
+        if ((10#$x < 10#$y)); then return 1; fi
+    done
+    return 0
 }
 
 # 8.5.12RC1, 8.3.36-dev ... : a pre-release of a version number is not the release
@@ -212,9 +226,9 @@ vendor_patched() {
             text=$(rpm -q --changelog "$pkg" 2>/dev/null)
         fi
     fi
-    [ -n "$text" ] || return 1
-    printf '%s\n' "$text" | grep -q 'CVE-2026-109618' || return 1
-    printf '%s\n' "$text" | grep -q 'CVE-2026-109619' || return 1
+    # pattern match, not `printf | grep -q`: see version_ge about early-exit pipes
+    # (a Debian changelog is larger than the 64 KiB pipe buffer)
+    [[ $text == *CVE-2026-109618* && $text == *CVE-2026-109619* ]] || return 1
     VENDOR_PKG=$pkg
     return 0
 }
@@ -287,10 +301,10 @@ list_bins() { # $1 = regex for basename, rest = dirs
     for d in "$@"; do
         [ -d "$d" ] || continue
         for f in "$d"/*; do
-            if [ ! -f "$f" ] || [ ! -x "$f" ]; then continue; fi
-            if printf '%s' "${f##*/}" | grep -Eq "$re"; then
-                readlink -f "$f"
-            fi
+            # in-process name match first: /usr/bin holds thousands of files and
+            # this runs once per SAPI, so no fork per file
+            [[ ${f##*/} =~ $re ]] || continue
+            if [ -f "$f" ] && [ -x "$f" ]; then readlink -f "$f"; fi
         done
     done | sort -u
 }
@@ -338,7 +352,9 @@ valid_snippet_output() { # 7 pipe-separated fields
 }
 
 version_from_v() { # reads `<bin> -v` / `frankenphp version` output, prints PHP's version string
-    grep -Eo 'PHP [0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._+~-]*' | head -n1 | cut -c5-
+    local text re='PHP ([0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._+~-]*)'
+    text=$(cat)
+    if [[ $text =~ $re ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; fi
 }
 
 # ---------------------------------------------------------------- CLI
@@ -422,8 +438,11 @@ fpm_effective_conf() { # $1 = fpm binary
 fpm_main_conf() { # $1 = fpm binary, $2 = X.Y
     local bin=$1 xy=$2 nodot c
     nodot=${xy/./}
-    c=$("$bin" -tt 2>&1 | grep -Eo "configuration file '?[^ ']+" | head -n1 | sed -E "s/^configuration file '?//")
-    if [ -n "$c" ] && [ -f "$c" ]; then echo "$c"; return; fi
+    c=$("$bin" -tt 2>&1)
+    if [[ $c =~ configuration\ file\ \'?([^\ \']+) ]]; then
+        c=${BASH_REMATCH[1]}
+        if [ -f "$c" ]; then echo "$c"; return; fi
+    fi
     for c in "$ETC_DIR/php/$xy/fpm/php-fpm.conf" "$ETC_DIR/php$nodot/php-fpm.conf" \
              "$ETC_DIR/opt/remi/php$nodot/php-fpm.conf" "/usr/local/etc/php-fpm.conf" \
              "$ETC_DIR/php-fpm.conf"; do
@@ -552,8 +571,8 @@ done
 scan_processes() {
     local p pid comm exe lim kind stale_list="" n_stale=0 rlimit_list="" n_rlimit=0 shown=0
     for p in "$PROC_DIR"/[0-9]*; do
-        [ -r "$p/comm" ] || continue
-        comm=$(cat "$p/comm" 2>/dev/null) || continue
+        # builtin read, not `cat`: this loop visits every process of the host
+        { read -r comm < "$p/comm"; } 2>/dev/null || continue
         pid=${p##*/}
         case "$comm" in
             php-fpm*|php-cgi*|lsphp*|frankenphp*) kind=bin ;;

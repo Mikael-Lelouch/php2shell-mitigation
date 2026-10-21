@@ -18,6 +18,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/). `check-php2shel
   (exit 3) unless `FIXED_<major>_<minor>` is set.
 - `session.upload_progress.enabled` = `n/a` (no session extension) no longer blocks `MITIGATED`.
 - Empty arrays under `set -u` on bash 4.2/4.3; explicit bash 4+ check.
+- **Discovery took ~26 s** on a host with a normal `/usr/bin` (one `grep` fork per file, once per SAPI): now
+  in-process, under 1 s. Process scan also avoids a fork per process.
+- **`write error: Broken pipe` noise on stderr** when SIGPIPE is ignored (GitHub runners, many supervisors):
+  `printf | grep -q` on a >64 KiB changelog and `sort | head` exited early. Replaced by in-shell matching and a
+  pure-bash version comparison, so `-q` really prints only the verdict.
 - `-h` / unknown options were silently ignored; the stock Apache `php_admin_flag engine Off` line is no
   longer listed as a directive to review; `pm.max_requests=0` (default) is no longer reported.
 
@@ -34,7 +39,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/). `check-php2shel
   and Apache 2.4 + mod_php.
 - `mitigation/php.ini.snippet`: optional `max_input_*` lines and a warning that the default 7M upload cap
   breaks sites that need larger uploads.
-- `tests/run-tests.sh` (hermetic, 42 checks) and a GitHub Actions workflow (shellcheck, tests, integration
+- `tests/run-tests.sh` (hermetic, 46 checks, run with SIGPIPE ignored like CI) and a GitHub Actions workflow (shellcheck, tests, integration
   job on a real `php-fpm` / `php-cgi`).
 - README / PATCHING.md: per-advisory SAPI nuances, local changelog check for Debian/Ubuntu, restart guidance.
 
