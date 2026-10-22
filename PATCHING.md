@@ -83,6 +83,47 @@ sudo dnf update 'php83-php*'
 sudo systemctl restart php83-php-fpm
 ```
 
+## SUSE Linux Enterprise Server (SLES) / openSUSE
+
+> **Validation status.** `check-php2shell.sh` and the commands below follow SUSE's packaging conventions
+> (RPM, `php7` / `php8` packages, `/etc/php7` or `/etc/php8`, Apache module read from `LoadModule`). They
+> were **not validated on a real SLES host**: the environment this was written in could not reach any
+> SUSE repository. The script's SUSE-style code paths are covered by tests that use stubs shaped after those
+> conventions, which test the logic, not SLES itself. If a path differs on your hosts, open an issue with the
+> output of `php --ini`, `rpm -qa 'php*' 'apache2-mod_php*'` and `grep -r LoadModule /etc/apache2 | grep -i php`.
+
+On SLES 15 PHP comes from the **Web and Scripting Module**; enable it first if the packages are missing:
+```bash
+sudo SUSEConnect -l                                          # modules and their state
+sudo SUSEConnect -p sle-module-web-scripting/15.6/x86_64     # adjust the service pack / architecture
+```
+Then update from the maintenance channel and restart:
+```bash
+sudo zypper refresh
+zypper list-patches --cve=CVE-2026-109618     # pending patches for each CVE; empty = none pending
+zypper list-patches --cve=CVE-2026-109619     #   (already installed, or none released for your service pack)
+sudo zypper patch                             # all pending patches; or: sudo zypper patch --cve=CVE-2026-109618
+sudo zypper ps -s                             # processes still running pre-update files, and their service
+sudo systemctl restart php-fpm apache2        # whichever you run; then re-run the check
+```
+SUSE ships the fix as a patch on the **existing** package version, so `PHP_VERSION` does not move. Confirm
+from the installed package, not from the version number (works for any RPM distribution):
+```bash
+rpm -q --changelog "$(rpm -qf "$(readlink -f /usr/bin/php)")" | grep -E 'CVE-2026-10961[89]'
+```
+Both ids must be listed; this is what `check-php2shell.sh` does for each binary and for the Apache module.
+SUSE also tracks each CVE on its security page (`https://www.suse.com/security/cve/CVE-2026-109618.html`),
+which shows which products and service packs are affected and fixed.
+
+Layout notes for the mitigation files on SUSE-style systems (check with `php --ini` / `php-fpm -i`):
+- `php.ini` per SAPI under `/etc/php8/{cli,apache2,fpm,cgi}/`, drop-ins in the scan directory that
+  `php --ini` prints ("Scan for additional .ini files in").
+- FPM: `/etc/php8/fpm/php-fpm.d/`. If only `*.default` templates are there, FPM loads nothing: copy one to
+  `www.conf` first (the check script reports a lone template).
+- Apache: put [`mitigation/apache.conf.example`](mitigation/apache.conf.example) in `/etc/apache2/conf.d/`,
+  then `apache2ctl configtest && systemctl restart apache2`. PHP 7 names its module `mod_php7.c`, PHP 8
+  `mod_php.c`: the example covers both.
+
 ## Alpine Linux
 ```bash
 apk update

@@ -6,7 +6,8 @@
 # the highest-priority place to apply this file.
 #
 # Put it in server config or a vhost (e.g. /etc/apache2/conf-available/php2shell.conf
-# then `a2enconf php2shell`; RHEL: /etc/httpd/conf.d/php2shell.conf), then
+# then `a2enconf php2shell`; RHEL: /etc/httpd/conf.d/php2shell.conf; SUSE:
+# /etc/apache2/conf.d/php2shell.conf, then `apache2ctl configtest`), then
 #   apachectl configtest && systemctl restart apache2      (httpd on RHEL)
 # Restart, do not just reload, so every worker is replaced.
 # Validate with:  curl -i -F a=b https://your-site/index.php   -> 403 (no uploads)
@@ -36,6 +37,8 @@ LimitRequestLine 8190
 # mod_php only. php_admin_* cannot be overridden by .htaccess or ini_set().
 # Do NOT use php_value / php_flag for these, and make sure no directory block,
 # .htaccess or vhost puts a finite memory_limit back.
+# PHP 8 names its module mod_php.c, PHP 7 mod_php7.c (SLES 12/15 php7): an
+# <IfModule> block for a module that is not loaded is simply skipped, so both are listed.
 <IfModule mod_php.c>
     php_admin_flag  session.upload_progress.enabled off
     php_admin_value memory_limit -1
@@ -43,6 +46,12 @@ LimitRequestLine 8190
     php_admin_value upload_max_filesize 7M
     # PHP 8.5 only (the directive does not exist before 8.5):
     #php_admin_flag fatal_error_backtraces off
+</IfModule>
+<IfModule mod_php7.c>
+    php_admin_flag  session.upload_progress.enabled off
+    php_admin_value memory_limit -1
+    php_admin_value post_max_size 8M
+    php_admin_value upload_max_filesize 7M
 </IfModule>
 
 # Per-request php_value / php_flag (vhost, <Directory>, .htaccess) are applied

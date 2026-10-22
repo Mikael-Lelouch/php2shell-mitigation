@@ -8,6 +8,8 @@
 ;   /etc/php-fpm.d/www.conf               (RHEL)
 ;   /etc/php84/php-fpm.d/www.conf         (Alpine)
 ;   /usr/local/etc/php-fpm.d/www.conf     (Docker official image)
+;   /etc/php8/fpm/php-fpm.d/www.conf      (SUSE-style layout: if only www.conf.default exists,
+;                                          FPM loads nothing yet - copy it to www.conf first)
 ;
 ; php_admin_value / php_admin_flag cannot be overridden by ini_set() or
 ; .user.ini. Pool values are applied when the worker starts.

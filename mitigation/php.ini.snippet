@@ -10,6 +10,8 @@
 ;   Debian/Ubuntu : /etc/php/<X.Y>/{fpm,apache2,cgi}/conf.d/99-php2shell.ini
 ;   RHEL          : /etc/php.d/99-php2shell.ini
 ;   Alpine        : /etc/php<XY>/conf.d/99-php2shell.ini
+;   SUSE (SLES)   : the scan directory printed by `php --ini` ("Scan for additional .ini
+;                   files in"), e.g. /etc/php8/conf.d  (SUSE-style layout: check on your host)
 ;   Docker (php)  : /usr/local/etc/php/conf.d/99-php2shell.ini
 ; PHP 8.5 only: also install php85-only.ini (fatal_error_backtraces = 0).
 ;
