@@ -248,6 +248,89 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL  2500 files in a bin dir took ${T1}s (limit 8s), rc=$RC"
 fi
 
+# ---------------------------------------------------------------- Apache mod_php layouts
+# The SUSE-style and relative-LoadModule cases use stubs shaped after the packaging
+# conventions: they test the script's logic, they do not prove behaviour on a real SLES.
+stub_path_cli() { # name version up mem feb post upl strict -> stub in $E/path (found by `command -v`)
+    cat >"$E/path/$1" <<EOF
+#!/bin/sh
+# called as: <bin> -c <ini> -r <code>; answers the snippet whatever the arguments
+printf '%s' '$2|$3|$4|$5|$6|$7|$8'
+EOF
+    chmod +x "$E/path/$1"
+}
+
+# Debian / Ubuntu layout (no test covered it before)
+new_env; mkdir -p "$E/etc/php/8.3/apache2" "$E/etc/apache2/mods-enabled" "$E/lib"
+: >"$E/etc/php/8.3/apache2/php.ini"; : >"$E/lib/libphp8.3.so"
+stub_path_cli php8.3 8.3.35 1 128M n/a 8M 2M 0
+echo "LoadModule php_module $E/lib/libphp8.3.so" >"$E/etc/apache2/mods-enabled/php8.3.load"
+run
+check "mod_php (Debian layout) is evaluated" 2 '== Apache mod_php 8.3' '\[EXPOSED\] apache2:.*/etc/php/8.3/apache2/php.ini'
+
+# SUSE-style layout, module discovered from LoadModule, patched by the vendor (rpm)
+new_env; mkdir -p "$E/etc/php8/apache2" "$E/etc/apache2/sysconfig.d" "$E/lib64/apache2-prefork"
+: >"$E/etc/php8/apache2/php.ini"; : >"$E/lib64/apache2-prefork/mod_php8.so"
+stub_path_cli php8 8.2.20 1 128M n/a 8M 2M 0
+echo "LoadModule php_module $E/lib64/apache2-prefork/mod_php8.so" >"$E/etc/apache2/sysconfig.d/loadmodule.conf"
+cat >"$E/path/rpm" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -qf) echo "apache2-mod_php8-8.2.20-150600.1.1" ;;
+    -q)  printf '* Mon Oct 19 2026 Vendor <v@example.org> - 8.2.20\n- Security fixes: CVE-2026-109618 and CVE-2026-109619 (bsc#1)\n' ;;
+esac
+EOF
+chmod +x "$E/path/rpm"
+run
+check "mod_php (SUSE-style /etc/php8 layout): module found via LoadModule, vendor backport => PATCHED" 0 \
+    '== Apache mod_php php8 \(SUSE-style' '\[PATCHED\] apache2:.*/etc/php8/apache2/php.ini' 'changelog of apache2-mod_php8'
+
+# same layout, no backport in the changelog
+printf '#!/bin/sh\nexit 1\n' >"$E/path/rpm"; chmod +x "$E/path/rpm"
+run
+check "mod_php (SUSE-style layout) without backport => EXPOSED with its settings" 2 '\[EXPOSED\] apache2:.*/etc/php8/apache2/php.ini' 'session.upload_progress.enabled=1'
+
+# RHEL-style relative LoadModule (relative to ServerRoot /etc/httpd)
+new_env; mkdir -p "$E/etc/httpd/conf.modules.d" "$E/etc/httpd/modules"
+: >"$E/etc/httpd/modules/libphp.so"
+echo "LoadModule php_module modules/libphp.so" >"$E/etc/httpd/conf.modules.d/10-php.conf"
+bash -c 'ETC_DIR="$1"; apache_dirs=("$1/httpd"); source <(sed -n "/^apache_php_modules()/,/^}/p" "$2"); apache_php_modules' _ "$E/etc" "$SCRIPT" >"$TMP/mods.txt"
+if [ "$(cat "$TMP/mods.txt")" = "$E/etc/httpd/modules/libphp.so" ]; then
+    PASS=$((PASS + 1)); echo "ok    relative LoadModule path is resolved against ServerRoot"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL  relative LoadModule path is resolved against ServerRoot (got: $(cat "$TMP/mods.txt"))"
+fi
+
+# commented-out LoadModule lines must not count
+new_env; mkdir -p "$E/etc/apache2" "$E/lib"; : >"$E/lib/mod_php8.so"
+echo "#LoadModule php_module $E/lib/mod_php8.so" >"$E/etc/apache2/loadmodule.conf"
+bash -c 'ETC_DIR="$1"; apache_dirs=("$1/apache2"); source <(sed -n "/^apache_php_modules()/,/^}/p" "$2"); apache_php_modules' _ "$E/etc" "$SCRIPT" >"$TMP/mods.txt"
+if [ ! -s "$TMP/mods.txt" ]; then
+    PASS=$((PASS + 1)); echo "ok    a commented-out LoadModule is ignored"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL  a commented-out LoadModule is ignored (got: $(cat "$TMP/mods.txt"))"
+fi
+
+# stale mod_php: SUSE-style httpd-prefork with a replaced mod_php8.so
+new_env; stub_cli php8.3 8.3.36 1 128M n/a 8M 2M 0
+mkdir -p "$E/proc/300"
+echo "httpd-prefork" >"$E/proc/300/comm"
+printf '7f00 r-xp 00000000 08:01 1 /usr/lib64/apache2-prefork/mod_php8.so (deleted)\n' >"$E/proc/300/maps"
+run
+check "Apache (httpd-prefork) with a replaced mod_php8.so => EXPOSED, restart required" 2 '300\(httpd-prefork\)' 'VERDICT: EXPOSED \(restart required'
+new_env; stub_cli php8.3 8.3.36 1 128M n/a 8M 2M 0
+mkdir -p "$E/proc/301"
+echo "httpd-prefork" >"$E/proc/301/comm"
+printf '7f00 r-xp 00000000 08:01 1 /usr/lib64/apache2-prefork/mod_php8.so\n' >"$E/proc/301/maps"
+run
+check "Apache (httpd-prefork) with an up-to-date mod_php8.so is not flagged" 0 'VERDICT: PATCHED'
+new_env; stub_cli php8.3 8.3.36 1 128M n/a 8M 2M 0
+mkdir -p "$E/proc/302"
+echo "httpd-prefork" >"$E/proc/302/comm"
+printf '7f00 r-xp 00000000 08:01 1 /usr/lib64/apache2/mod_status.so (deleted)\n' >"$E/proc/302/maps"
+run
+check "Apache without mod_php is never flagged, even with another module replaced" 0 'VERDICT: PATCHED'
+
 # ---------------------------------------------------------------- PHP-FPM pools (php-fpm -tt)
 new_env
 stub_fpm php-fpm8.3 8.3.35 On 128M "[www]
@@ -285,6 +368,12 @@ EOF
 chmod +x "$E/sbin/php-fpm8.3"
 run
 check "FPM: unparsable config falls back to php.ini values with a warning" 2 'php-fpm -tt failed' 'EXPOSED'
+
+new_env
+stub_fpm php-fpm8.3 8.3.35 On 128M ""
+mkdir -p "$E/etc/php8/fpm/php-fpm.d"; : >"$E/etc/php8/fpm/php-fpm.d/www.conf.default"
+run
+check "FPM: a lone *.default template is reported as not being a pool" 2 'no pool found' 'only a template exists: .*www.conf.default'
 
 # ---------------------------------------------------------------- other SAPIs
 new_env; stub_cgi php-cgi8.3 8.3.35 1 128M n/a 8M 2M 0; run

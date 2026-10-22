@@ -4,7 +4,7 @@
 #   CVE-2026-109619 (GHSA-6wmf-4rv5-p3rp) RCE via stale global state
 # Official notice: https://www.php.net/archive/2026.php#2026-10-21-1
 #
-# Inspects every PHP CLI, PHP-FPM, php-cgi, Apache mod_php (Debian layout),
+# Inspects every PHP CLI, PHP-FPM, php-cgi, Apache mod_php (Debian and SUSE-style layouts),
 # LiteSpeed (lsphp) and FrankenPHP runtime it can find and reports its version
 # plus the effective values of the official interim settings:
 #   session.upload_progress.enabled   want 0            (CVE-2026-109619)
@@ -70,7 +70,7 @@
 
 set -u
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 
 # mapfile and the array handling below need bash 4+
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
@@ -397,21 +397,70 @@ if [ "${#FRANKEN_BINS[@]}" -gt 0 ]; then
     for bin in "${FRANKEN_BINS[@]}"; do version_only frankenphp "$bin" version; done
 fi
 
-# ---------------------------------------------------------------- Apache mod_php (Debian/Ubuntu layout)
+# ---------------------------------------------------------------- Apache mod_php
+apache_dirs=()
+for d in "$ETC_DIR/apache2" "$ETC_DIR/httpd"; do [ -d "$d" ] && apache_dirs+=("$d"); done
+
+# The module file is read from Apache's own `LoadModule php*_module <file>` lines,
+# so it does not depend on a distribution's naming (Debian libphp8.3.so, RHEL
+# libphp.so, SUSE-style mod_php8.so ...). Relative paths are relative to ServerRoot.
+apache_php_modules() { # prints each PHP module file that exists
+    local line f c
+    [ "${#apache_dirs[@]}" -gt 0 ] || return 0
+    while IFS= read -r line; do
+        read -r _ _ f _ <<<"$line"
+        case "$f" in
+            /*) [ -f "$f" ] && printf '%s\n' "$f" ;;
+            ?*) for c in "$ETC_DIR/httpd/$f" "$ETC_DIR/apache2/$f"; do
+                    if [ -f "$c" ]; then printf '%s\n' "$c"; break; fi
+                done ;;
+        esac
+    done < <(grep -rEh '^[[:space:]]*LoadModule[[:space:]]+php[0-9]*_module[[:space:]]' "${apache_dirs[@]}" 2>/dev/null)
+}
+mapfile -t APACHE_PHP_MODS < <(apache_php_modules)
+
+pick_module() { # $1 = preferred name fragment, $2 = fallback file -> module file to ask the package manager about
+    local m
+    for m in ${APACHE_PHP_MODS[@]+"${APACHE_PHP_MODS[@]}"}; do
+        case "${m##*/}" in *"$1"*) printf '%s\n' "$m"; return 0 ;; esac
+    done
+    if [ "${#APACHE_PHP_MODS[@]}" -gt 0 ]; then printf '%s\n' "${APACHE_PHP_MODS[0]}"; else printf '%s\n' "$2"; fi
+}
+
+# check_mod_php <apache2 php.ini> <CLI binary> <conf.d dir or ""> <module file>
+# "" = keep the CLI's compiled-in scan dir (layouts where conf.d is shared by every SAPI)
+check_mod_php() {
+    local ini=$1 bin=$2 scan=$3 vlib=$4 out
+    if [ -n "$scan" ]; then
+        out=$(PHP_INI_SCAN_DIR="$scan" "$bin" -c "$ini" -r "$INI_SNIPPET" 2>/dev/null) || return 0
+    else
+        out=$("$bin" -c "$ini" -r "$INI_SNIPPET" 2>/dev/null) || return 0
+    fi
+    valid_snippet_output "$out" || return 0
+    parse_snippet "$out"
+    evaluate "apache2:$ini" "$V_VER" "$V_UP" "$V_MEM" "$V_FEB" "$V_POST" "$V_UPL" "$V_ST" "" "$vlib"
+}
+
+# Debian / Ubuntu layout: /etc/php/X.Y/apache2/{php.ini,conf.d}
 for ini in "$ETC_DIR"/php/*/apache2/php.ini; do
     [ -f "$ini" ] || continue
     xy=${ini#"$ETC_DIR"/php/}; xy=${xy%%/*}
     bin=$(command -v "php$xy" 2>/dev/null) || continue
-    vlib="/usr/lib/apache2/modules/libphp$xy.so"
-    [ -f "$vlib" ] || vlib=$bin
     say "== Apache mod_php $xy (approximation via php$xy CLI with apache2 ini; highest-risk SAPI)"
-    out=$(PHP_INI_SCAN_DIR="$ETC_DIR/php/$xy/apache2/conf.d" "$bin" -c "$ini" -r "$INI_SNIPPET" 2>/dev/null) || continue
-    valid_snippet_output "$out" || continue
-    parse_snippet "$out"
-    evaluate "apache2:$ini" "$V_VER" "$V_UP" "$V_MEM" "$V_FEB" "$V_POST" "$V_UPL" "$V_ST" "" "$vlib"
+    vlib="/usr/lib/apache2/modules/libphp$xy.so"
+    [ -f "$vlib" ] || vlib=$(pick_module "php$xy" "$bin")
+    check_mod_php "$ini" "$bin" "$ETC_DIR/php/$xy/apache2/conf.d" "$vlib"
 done
-apache_dirs=()
-for d in "$ETC_DIR/apache2" "$ETC_DIR/httpd"; do [ -d "$d" ] && apache_dirs+=("$d"); done
+
+# SUSE-style layout: /etc/php<N>/apache2/php.ini, conf.d shared by the SAPIs.
+# (Layout from SUSE packaging conventions: not validated on a real SLES host.)
+for ini in "$ETC_DIR"/php[0-9]*/apache2/php.ini; do
+    [ -f "$ini" ] || continue
+    n=${ini#"$ETC_DIR"/php}; n=${n%%/*}
+    bin=$(command -v "php$n" 2>/dev/null) || bin=$(command -v php 2>/dev/null) || continue
+    say "== Apache mod_php php$n (SUSE-style layout; approximation via the CLI with the apache2 ini and its compiled-in conf.d; highest-risk SAPI)"
+    check_mod_php "$ini" "$bin" "" "$(pick_module "php$n" "$bin")"
+done
 if [ "${#apache_dirs[@]}" -gt 0 ]; then
     # `php_admin_flag engine` is the stock "no PHP in user dirs" line, unrelated to this advisory
     hits=$(grep -rEn '^[[:space:]]*php_(admin_)?(value|flag)[[:space:]]' "${apache_dirs[@]}" 2>/dev/null \
@@ -531,6 +580,10 @@ for fpm in ${FPM_BINS[@]+"${FPM_BINS[@]}"}; do
     pools=$(printf '%s\n' ${ovr[@]+"${ovr[@]}"} | cut -d'|' -f1 | grep -v '^$' | awk '!seen[$0]++')
     if [ -z "$pools" ]; then
         say "  ! no pool found in the FPM configuration - evaluating php.ini values only"
+        # FPM loads *.conf only: a lone *.default template is not a pool
+        for f in "$ETC_DIR"/php*/fpm/php-fpm.d/*.default "$ETC_DIR"/php-fpm.d/*.default /usr/local/etc/php-fpm.d/*.default; do
+            if [ -f "$f" ]; then say "      only a template exists: $f (FPM does not load it; copy it to a .conf file)"; break; fi
+        done
         evaluate "fpm:$fpm" "$ver" "$b_up" "$b_mem" "$b_feb" "$b_post" "$b_upl" "$b_st" "" "$fpm"
         continue
     fi
@@ -578,13 +631,13 @@ scan_processes() {
             php-fpm*|php-cgi*|lsphp*|frankenphp*) kind=bin ;;
             apache2|httpd|httpd.*|httpd-*)
                 # only the Apache processes that actually loaded mod_php
-                if [ -r "$p/maps" ] && grep -q 'libphp[^ ]*\.so' "$p/maps" 2>/dev/null; then kind=mod; else continue; fi ;;
+                if [ -r "$p/maps" ] && grep -Eq '(libphp|mod_php)[^ ]*\.so' "$p/maps" 2>/dev/null; then kind=mod; else continue; fi ;;
             *) continue ;;
         esac
         if [ "$kind" = bin ]; then
             exe=$(readlink "$p/exe" 2>/dev/null) || exe=""
             case "$exe" in *" (deleted)") stale_list="$stale_list $pid($comm)"; n_stale=$((n_stale + 1)) ;; esac
-        elif grep -Eq 'libphp[^ ]*\.so.*\(deleted\)' "$p/maps" 2>/dev/null; then
+        elif grep -Eq '(libphp|mod_php)[^ ]*\.so.*\(deleted\)' "$p/maps" 2>/dev/null; then
             stale_list="$stale_list $pid($comm)"; n_stale=$((n_stale + 1))
         fi
         if [ -r "$p/limits" ]; then

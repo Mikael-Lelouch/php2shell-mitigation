@@ -147,6 +147,10 @@ Options: `-q` (only the verdict), `-h` (help), `-V` (version).
   runtime as `PATCHED` when **both** `CVE-2026-109618` and `CVE-2026-109619` are listed (one id is not enough:
   a changelog can name a patch file `CVE-2026-109618_109619.patch`). Alpine has no local changelog: check
   <https://security.alpinelinux.org/>.
+- **SUSE Linux Enterprise Server.** RPM changelogs are read as above; Apache's PHP module is located from its
+  `LoadModule php*_module` lines (so `mod_php8.so`, `libphp*.so`… all work) and a `/etc/php<N>/apache2/php.ini`
+  layout is evaluated like the Debian one. See [PATCHING.md](PATCHING.md#suse-linux-enterprise-server-sles--opensuse)
+  for the `zypper` steps. **Not validated on a real SLES host** (tested with stubs only): please report differences.
 - **Restart check.** A package update leaves the old code in memory until the workers restart. The script
   flags running `php-fpm` / `php-cgi` / `lsphp` / `frankenphp` processes (and Apache processes with mod_php)
   whose binary or library was replaced on disk. Run it as root to see them.
@@ -289,6 +293,11 @@ plus récente que le script, `UNKNOWN-BRANCH`, par ex. 8.6). Code 64 : option in
   comme `PATCHED` quand **les deux** `CVE-2026-109618` et `CVE-2026-109619` y figurent (un seul identifiant ne
   suffit pas : un changelog peut nommer un fichier `CVE-2026-109618_109619.patch`). Alpine n'a pas de changelog
   local : voir <https://security.alpinelinux.org/>.
+- **SUSE Linux Enterprise Server.** Les changelogs RPM sont lus comme ci-dessus ; le module PHP d'Apache est
+  localisé à partir de ses lignes `LoadModule php*_module` (donc `mod_php8.so`, `libphp*.so`… fonctionnent) et
+  une disposition `/etc/php<N>/apache2/php.ini` est évaluée comme celle de Debian. Voir
+  [PATCHING.md](PATCHING.md#suse-linux-enterprise-server-sles--opensuse) pour les étapes `zypper`.
+  **Non validé sur un vrai hôte SLES** (testé avec des simulations uniquement) : merci de signaler les écarts.
 - **Contrôle du redémarrage.** Une mise à jour laisse l'ancien code en mémoire tant que les workers ne sont pas
   redémarrés. Le script signale les processus `php-fpm` / `php-cgi` / `lsphp` / `frankenphp` (et Apache avec
   mod_php) dont le binaire ou la bibliothèque a été remplacé sur disque : verdict `EXPOSED`. À lancer en root.

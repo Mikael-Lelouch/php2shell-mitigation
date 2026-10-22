@@ -3,6 +3,22 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/). `check-php2shell.sh` exit codes
 (0 PATCHED, 1 MITIGATED, 2 EXPOSED, 3 UNKNOWN) are a stable interface and did not change.
 
+## [1.2.0] - 2026-10-22
+
+### Added: SUSE Linux Enterprise Server (SLES) support, **not validated on a real SLES host**
+The environment could not reach any SUSE repository, so the layout is taken from SUSE packaging conventions and
+covered by tests that use stubs (they test the logic, not SLES). Please report differences.
+- Apache's PHP module is found from its `LoadModule php*_module` lines instead of a Debian file name, so
+  `mod_php8.so`, `libphp*.so` and a relative `modules/libphp.so` (RHEL) are all located; the owning RPM's
+  changelog then decides `PATCHED`.
+- `/etc/php<N>/apache2/php.ini` (SUSE-style) mod_php layout is evaluated like the Debian one; the Debian layout,
+  previously untested, now has a test.
+- Restart check recognises `mod_php*.so` and the `httpd-prefork` process name; an Apache process without PHP
+  loaded is never flagged.
+- A lone `*.default` FPM template is reported as "not a pool" (FPM loads `*.conf` only).
+- `PATCHING.md`: SLES section (`SUSEConnect`, `zypper list-patches --cve`, `zypper patch`, `zypper ps -s`);
+  `apache.conf.example` also covers PHP 7 (`mod_php7.c`); SUSE paths noted in the other mitigation files.
+
 ## [1.1.0] - 2026-10-22
 
 ### Fixed (`check-php2shell.sh`)
